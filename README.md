@@ -1,4 +1,4 @@
-# TRAIN — Train Fire Suppression and Alert System
+# Platform Alert System
 ### Updated Project Proposal — Phase 2
 
 > **Team:** TRAIN &nbsp;|&nbsp; **Course:** Edge Computing &nbsp;|&nbsp; **Due:** End of Week 5
@@ -28,105 +28,84 @@
 
 ## 1. Project Overview
 
-TRAIN is a distributed **edge–fog–cloud** fire suppression and early warning system designed for passenger trains. 
-Each train car is equipped with an **ESP32 microcontroller** connected to a CO₂/smoke sensor. When fire is detected in any car, the system responds in layers:
+The Platform Alert System is a distributed edge–cloud safety system designed to prevent train-related accidents at station platforms. Two Jetson Nano units are deployed on opposite sides of the platform, each equipped with a camera and a manual stop button.
 
-- 🔴 The **affected car** immediately activates local suppression
-- 🟠 **Adjacent cars** preemptively activate suppression before fire spreads
-- 🟡 **Non-adjacent cars** receive an alarm only — no unnecessary water activation
-- ☁️ The **cloud server** is notified to halt the train and log the event
+If a person is detected on the railroad tracks — either by the camera's on-device computer vision model or by a passenger pressing the emergency button — the system immediately alerts the server so an incoming train can be stopped before reaching the platform.
 
-This layered response minimizes structural damage and avoids unnecessary panic or water damage in unaffected cars.
+Why Two Inputs?
+> * Camera (CV inference): Automatically detects people on the tracks using a YOLOv8-nano object detection model running directly on the Jetson Nano's GPU. This handles the common case.
+> * Manual Button (GPIO): Allows a bystander to trigger an alert in edge cases where the camera may fail — for example, a small child who falls onto the tracks may be too small or partially obscured for the model to detect confidently.
+
+Why This Requires Edge Computing
+> Running real-time person detection on a live camera feed is genuine edge computation. The Jetson Nano's 128-core Maxwell GPU runs the inference model locally — no cloud round-trip is needed to decide whether a person is on the tracks. This keeps latency in the range of milliseconds, which is critical when a train may be seconds away.
 
 ***
 
 ## 2. Use Case Examples
 
-**Example 1 — Fire in Car A:**
+**Example**
 
 ```
-   Car A               Car B               Car C
-Fire detected      Water + Alarm         Alarm only
-Water + Alarm
+PLATFORM SIDE A                  RAILROAD                  PLATFORM SIDE B
+
+[Button A] [Jetson A]                                    [Jetson B] [Button B]
+           [Camera >────────────────────────────────────────< Camera]
+                      watching the railroad area
 ```
 
-**Example 2 — Fire in Car B:**
-
 ```
-   Car A               Car B               Car C
-Water + Alarm      Fire detected        Water + Alarm
-                   Water + Alarm
+PLATFORM SIDE A                  RAILROAD                  PLATFORM SIDE B
+
+[Button A] [Jetson A]                                    [Jetson B] [Button B]
+                                                                         ↑ pressed
+                                                    alert sent to server + Jetson A notified
 ```
 
-> Adjacent cars always receive preemptive suppression. Non-adjacent cars receive alarm only.
+> Cameras are positioned on both platforms, overlooking the railroad.
 
 ***
 
 ## 3. Updated Solution
 
-The solution is a three-layer distributed network:
+The solution is a three-layer distributed network deployed across two platform ends:
 
-| Layer | Device | Role |
-|-------|--------|------|
-| **Edge** | ESP32 (×3, one per car) | Sense, respond locally, publish alerts |
-| **Fog** | Jetson Nano (×1, train head) | MQTT broker, adjacency logic, coordination |
-| **Cloud** | Remote server | Event logging, remote monitoring |
+| Layer | Device        | Role |
+|-------|---------------|---------------------------------------------------------------------------|
+| Edge  | Jetson Nano   | A & B	Camera CV inference, button GPIO, local alarm activation
+| Cloud | Remote server	| Train stop command, event logging, remote monitoring
 
-### Why ESP32 at the Edge?
+Architecture Rationale
+Each Jetson Nano operates as an edge device. The two Jetsons communicate directly over the local network via MQTT — if either side triggers an alert, the other side is notified immediately without waiting for the server. This ensures both ends of the platform react in parallel, even if the cloud connection is temporarily unavailable.
 
-Replacing per-car Jetson Nanos with ESP32 units significantly reduces cost, power draw, and complexity while maintaining full capability for the sensing and response tasks required at the edge.
-
-| | ESP32 per car | Jetson Nano per car |
-|---|---|---|
-| **Cost** | ~$5–10 | ~$100+ |
-| **Power draw** | ~240mA | ~2A+ |
-| **Built-in WiFi** | ✅ Yes | ❌ Needs add-on |
-| **MQTT support** | ✅ Native (`PubSubClient`) | ✅ Yes |
-| **AI/ML needed?** | ❌ No | ❌ Overkill |
-
-The Jetson Nano retains its role as the **fog coordinator**, where its processing power is used for topology management, adjacency logic, and cloud bridging.
+The server's role is coordination with external systems (the train) and persistent logging - not the primary decision maker. The decision to raise an alert is made entirely at the edge.
 
 ***
 
 ## 4. System Design Diagram
 
 ```
-         ══════════════ Local WiFi Network (On-Train) ══════════════
-                │                      │                      │
-        ┌───────────────┐      ┌───────────────┐      ┌───────────────┐
-        │   ESP32       │      │   ESP32       │      │   ESP32       │
-        │   Car 1       │      │   Car 2       │      │   Car 3       │
-        │  ──────────   │      │  ──────────   │      │  ──────────   │
-        │  CO₂ Sensor   │      │  CO₂ Sensor   │      │  CO₂ Sensor   │
-        │  Suppress LED │      │  Suppress LED │      │  Suppress LED │
-        │  Alarm LED    │      │  Alarm LED    │      │  Alarm LED    │
-        └───────┬───────┘      └───────┬───────┘      └───────┬───────┘
-                │      MQTT pub/sub    │     MQTT pub/sub      │
-                └──────────────────────┴───────────────────────┘
-                                       │
-                              ┌────────────────┐
-                              │  Jetson Nano   │  ← Fog Layer
-                              │                │
-                              │ MQTT Broker    │
-                              │ (Mosquitto)    │
-                              │                │
-                              │ Adjacency      │
-                              │ Logic          │
-                              │                │
-                              │ Stop Command   │
-                              └────────┬───────┘
-                                       │
-                                  playit.gg
-                                  (tunnel)
-                                       │
-                              ┌────────────────┐
-                              │  Cloud Server  │  ← Cloud Layer
-                              │ (Train Station │
-                              │  Command Tower)│
-                              │                │
-                              │ Event Logging  │
-                              │ Remote Monitor │
-                              └────────────────┘
+        ══════════ Local Network (WiFi / Ethernet) ══════════
+
+   ┌─────────────────┐                           ┌─────────────────┐
+   │   Jetson A      │                           │   Jetson B      │
+   │  ─────────────  │                           │  ─────────────  │
+   │  Camera (CV     │                           │  Camera (CV     │
+   │  inference)     │◄──── MQTT peer alert ────►│  inference)     │
+   │  Button (GPIO)  │                           │  Button (GPIO)  │
+   └────────┬────────┘                           └────────┬────────┘
+            │                                             │
+            └──────────────────┬──────────────────────────┘
+                               │ MQTT
+                        ┌──────────────┐
+                        │    Server    │
+                        │  (via MQTT / │
+                        │  playit.gg)  │
+                        │              │
+                        │ Sends STOP   │
+                        │ command to   │
+                        │ incoming     │
+                        │ train        │
+                        └──────────────┘
 ```
 
 ***
@@ -134,53 +113,48 @@ The Jetson Nano retains its role as the **fog coordinator**, where its processin
 ## 5. Workload Distribution Diagram
 
 ```
-┌──────────────────────┬───────────────────────────┬──────────────────────────┐
-│   ESP32 — Edge       │   Jetson Nano — Fog        │   Cloud Server           │
-├──────────────────────┼───────────────────────────┼──────────────────────────┤
-│ • Read CO₂/smoke     │ • Run MQTT Broker          │ • Receive event stream   │
-│   sensor (ADC)       │   (Mosquitto)              │ • Store logs to DB       │
-│ • Threshold check    │ • Maintain train           │ • Timestamp all events   │
-│ • Activate local     │   topology map             │ • Display dashboard      │
-│   LED/suppression    │ • Adjacency logic          │ • Remote monitoring      │
-│ • Publish alert to   │   (suppress vs alarm only) │   for operators          │
-│   broker             │ • Broadcast global alarm   │ • Cross-train analytics  │
-│ • Subscribe to       │ • Issue train stop command │                          │
-│   suppress + alarm   │ • Bridge events → cloud    │                          │
-│   topics             │   via playit.gg tunnel     │                          │
-├──────────────────────┼───────────────────────────┼──────────────────────────┤
-│ Latency:  < 1ms      │ Latency:  ~5–20ms (LAN)   │ Latency:  100ms+ (OK)    │
-│ Language: C/C++      │ Language: Python           │ Language: Python / Node  │
-│ Power:    ~240mA     │ Power:    ~2A              │ —                        │
-└──────────────────────┴───────────────────────────┴──────────────────────────┘
+┌──────────────────────────────┬───────────────────────────┬──────────────────────────┐
+│   Jetson Nano A & B — Edge   │   Jetson Nano A & B — Fog │   Cloud Server           │
+├──────────────────────────────┼───────────────────────────┼──────────────────────────┤
+│ • Capture live camera feed   │ • Run MQTT Broker         │ • Receive alert event    │
+│ • Run YOLOv8-nano inference  │   (Mosquitto) on Jetson A │ • Issue STOP command     │
+│   on Jetson GPU              │ • Route peer alert to     │   to incoming train      │
+│ • Threshold: "person"        │   other Jetson            │ • Log: timestamp,        │
+│   class detected → alert     │ • Forward events to       │   source, Jetson ID,     │
+│ • Read GPIO button state     │   cloud via playit.gg     │   confidence score       │
+│ • On trigger: activate       │   tunnel                  │ • Remote monitoring      │
+│   local LED alarm            │                           │   dashboard              │
+│ • Publish to MQTT broker     │                           │                          │
+├──────────────────────────────┼───────────────────────────┼──────────────────────────┤
+│ Latency:  < 100ms (inference)│ Latency:  ~5–20ms (LAN)   │ Latency:  100ms+ (OK)    │
+│ Language: Python             │ Language: C++             │ Language: C++            │
+│ Compute:  Jetson GPU (CUDA)  │ Compute:  CPU only        │ Compute:  CPU            │
+└──────────────────────────────┴───────────────────────────┴──────────────────────────┘
+
 ```
 
 ### MQTT Topic Structure
 
 | Topic | Publisher | Subscriber(s) | Purpose |
 |-------|-----------|---------------|---------|
-| `train/car/N/alert` | ESP32 Car N | Jetson Nano | Fire detected in car N |
-| `train/car/N/suppress` | Jetson Nano | ESP32 Car N | Trigger suppression in car N |
-| `train/global/alarm` | Jetson Nano | All ESP32s | System-wide alarm broadcast |
-| `train/control/stop` | Jetson Nano | Cloud / external system | Halt the train |
+| `platform/alert` | Jetson A or B | Both Jetsons | Person detected or button pressed |
+| `platform/alarm` | Jetson A (Broker) | Both Jetsons | Activate local LED alarms on all nodes |
+| `platform/stop` | Jetson A (Broker) | Server | Issue train stop command |
 
-### Message Flow — Car 2 Fire Detection
+### Message Flow 
 
 ```
-1. ESP32 Car 2 — sensor threshold crossed
-   ├─► Activates local LED/suppression        ← INSTANT (no network)
-   └─► Publishes → train/car/2/alert          ← WiFi LAN ~5ms
+1. Jetson A camera detects person on tracks (edge inference)
+   OR Jetson A button pressed
+   └─► Jetson A publishes → platform/alert  (MQTT, local)
+   └─► Jetson A activates local alarm/LED
 
-2. Jetson Nano — receives alert on train/car/2/alert
-   ├─► Publishes → train/car/1/suppress       ← WiFi LAN ~10ms
-   ├─► Publishes → train/car/3/suppress       ← WiFi LAN ~10ms
-   ├─► Publishes → train/global/alarm         ← WiFi LAN ~10ms
-   └─► Publishes → train/control/stop
+2. Jetson B receives platform/alert
+   └─► Jetson B activates local alarm/LED
 
-3. ESP32 Car 1 & Car 3 — receive suppress command
-   └─► Activate suppression LED + alarm LED
-
-4. Cloud Server — receives bridged event via playit.gg
-   └─► Logs: { timestamp, car_id: "car_2", sensor_value, actions: [...] }
+3. Server receives platform/alert via playit.gg from Jetson A
+   └─► Issues STOP command to incoming train
+   └─► Logs: timestamp, source (camera/button), Jetson ID
 ```
 
 ***
@@ -191,27 +165,27 @@ The Jetson Nano retains its role as the **fog coordinator**, where its processin
 
 | Component | Qty | Role | Layer | Key Specs |
 |-----------|-----|------|-------|-----------|
-| ESP32 Dev Board | 3 | Car sensor + actuator node | Edge | Dual-core 240MHz, built-in 2.4GHz WiFi, 520KB SRAM |
-| Jetson Nano Developer Kit | 1 | Fog coordinator, MQTT broker | Fog | Quad-core ARM A57, 4GB RAM, 128-core Maxwell GPU |
-| MQ-2 or MQ-135 Smoke/CO₂ Sensor | 3 | Fire/smoke detection | Edge | Analog + digital output, detects CO, CH₄, LPG, smoke |
-| Red LED | 3 | Simulates local suppression activation | Edge | 3.3V GPIO-controlled |
-| Yellow/Blue LED | 3 | Simulates alarm indicator | Edge | 3.3V GPIO-controlled |
-| USB WiFi Dongle (if needed) | 1 | Wireless connectivity for Jetson Nano | Fog | 802.11 b/g/n, 2.4GHz |
-| USB-C / MicroUSB Power Supply | 4 | Power for ESP32s and Jetson Nano | All | 5V 2A minimum for Nano |
-| Jumper Wires + Breadboard | — | Circuit prototyping | Edge | Standard 3.3V/5V logic |
+| Jetson Nano Developer Kit | 2 | Edge inference + fog coordination | Edge / Fog | Quad-core ARM A57, 4GB RAM, 128-core Maxwell GPU |
+| USB Camera (e.g. Logitech C270) | 2 | Live video feed for CV inference | Edge | 720p, 30fps, USB 2.0 |
+| Push Button | 2 | Manual emergency stop trigger | Edge | Momentary, GPIO 3.3V |
+| Red LED | 2 | Simulates platform alarm activation | Edge | 3.3V GPIO-controlled |
+| Resistor (330Ω) | 2 | Current limiting for LEDs | Edge | Through-hole |
+| USB WiFi Dongle | 2 | Wireless connectivity for Jetson Nanos | Fog | 802.11 b/g/n, 2.4GHz |
+| USB-C Power Supply | 2 | Power for Jetson Nanos | All | 5V 4A recommended |
+| Jumper Wires + Breadboard | — | GPIO circuit prototyping | Edge | Standard 3.3V logic |
 
 ### Software
 
 | Software / Library | Device | Purpose |
 |--------------------|--------|---------|
-| Arduino IDE / PlatformIO | ESP32 | Firmware development |
-| `PubSubClient` | ESP32 | MQTT client over WiFi |
-| `WiFi.h` | ESP32 | WiFi connection management |
-| Mosquitto MQTT Broker | Jetson Nano | Local message broker |
-| `paho-mqtt` (Python) | Jetson Nano | Fog logic, adjacency algorithm |
-| Python 3 | Jetson Nano | Fog application runtime |
-| playit.gg agent | Jetson Nano | Tunnel to cloud server |
-| Flask or Node.js | Cloud Server | Event log API + dashboard |
+| Python 3 | Jetson Nano A & B | Application runtime |
+| YOLOv8-nano (`ultralytics`) | Jetson Nano A & B | Real-time person detection on camera feed |
+| OpenCV (`cv2`) | Jetson Nano A & B | Camera capture and frame preprocessing |
+| Mosquitto MQTT Broker | Jetson Nano A | Local message broker for both Jetsons |
+| `paho-mqtt` (Python) | Jetson Nano A & B | MQTT publish/subscribe client |
+| `Jetson.GPIO` (Python) | Jetson Nano A & B | Button input and LED output via GPIO |
+| playit.gg agent | Jetson Nano A | Tunnel to expose MQTT events to cloud server |
+| Flask or Node.js | Cloud Server | Event log API and monitoring dashboard |
 | SQLite / PostgreSQL | Cloud Server | Persistent event storage |
 
 ### Network
@@ -219,70 +193,73 @@ The Jetson Nano retains its role as the **fog coordinator**, where its processin
 | Parameter | Value |
 |-----------|-------|
 | Local network | WiFi router or mobile hotspot (2.4GHz) |
-| MQTT broker address | Local IP of Jetson Nano (e.g., `192.168.1.100`) |
+| MQTT broker address | Local IP of Jetson Nano A (e.g., `192.168.1.100`) |
 | MQTT port | `1883` (unencrypted, LAN-only) |
-| Cloud tunnel | playit.gg agent on Jetson Nano |
-| Internet dependency | ❌ Optional — system functions fully offline |
+| Cloud tunnel | playit.gg agent on Jetson Nano A |
+| Internet dependency | ❌ Optional — alert and alarm function fully offline |
 
 ***
 
 ## 7. Proof of Concept Demo Plan
 
-Three ESP32 units represent **Cars 1, 2, and 3**, each connected to the Jetson Nano's MQTT broker over a shared WiFi hotspot. Each ESP32 has a CO₂/smoke sensor and two LEDs (suppression + alarm).
+Two Jetson Nanos are placed on opposite ends of a table representing the two platform sides. Each has a USB camera pointed toward the center (the "railroad area"), a push button, and a red LED. Jetson A also runs the Mosquitto MQTT broker.
 
 ### Demo Steps
 
 | Step | Action | Expected Result |
 |------|--------|-----------------|
-| 1 | Power on all 3 ESP32s and Jetson Nano | All devices connect to broker; no LEDs active |
-| 2 | Introduce controlled combustion near Car 2 sensor (burning paper) | Car 2 sensor crosses threshold |
-| 3 | Car 2 threshold exceeded | Car 2 suppression LED lights immediately (edge-local) |
-| 4 | Jetson Nano receives `train/car/2/alert` | Sends suppress to Cars 1 & 3, broadcasts global alarm |
-| 5 | Cars 1 & 3 receive suppress command | Suppression + alarm LEDs activate on Cars 1 & 3 |
-| 6 | Global alarm broadcast received by all | All alarm LEDs active across all 3 cars |
-| 7 | Server log displayed on screen | Entry shown: timestamp, `car_id: car_2`, sensor value, actions |
+| 1 | Power on both Jetsons, start MQTT broker on Jetson A | Both devices connect to broker; no LEDs active |
+| 2 | Start camera feed + YOLOv8 inference on both Jetsons | Live detection running; no person present, no alert |
+| 3a | A person is placed in the camera's view of the "track area" | YOLOv8 detects `person` class → Jetson publishes `platform/alert` |
+| 3b *(alternative)* | Bystander presses the physical button | GPIO trigger → Jetson publishes `platform/alert` |
+| 4 | Broker routes the alert to both Jetsons | Both red LEDs activate simultaneously |
+| 5 | Server receives `platform/stop` via playit.gg | Server log displayed: timestamp, source (`camera`/`button`), Jetson ID, confidence score |
 
-> The demo is fully self-contained — no internet connection is required for steps 1–6. The cloud log (step 7) requires the playit.gg tunnel to be active.
+> **The demo is fully self-contained** — steps 1–4 require no internet connection. The server log (step 5) requires the playit.gg tunnel to be active.
 
 ***
-
-## 8. Team Contribution Report — Scrum Sprint Report
-
-**Sprint:** Phase 1 → Phase 2 Update
-**Sprint Goal:** Finalize architecture, select hardware components, establish repository, produce updated proposal.
 
 ### Contributions
 
 | Member | Role | Contributions | Story Points |
 |--------|------|--------------|:------------:|
-| Dmytro Gozha | Edge Layer Lead | Designed ESP32 firmware architecture, defined MQTT topic structure, researched ESP32 + MQ sensor integration, set up GitHub repository | 8 |
-| Stephen He | Fog Layer Lead | Designed Jetson Nano fog logic, researched Mosquitto broker setup, defined adjacency algorithm, documented workload distribution | 8 |
-| Armando Hernandez | Cloud Layer Lead | Designed cloud server architecture, researched playit.gg tunnel integration, defined event logging schema, drafted cloud documentation | 7 |
-| Elmer Payan | Systems Integrator | Produced system design diagram, compiled technical worksheet, coordinated demo plan, assembled final proposal document | 7 |
+| Dmytro Gozha | Cloud Layer Lead | Designed cloud server architecture, defined event logging schema, researched playit.gg tunnel integration for MQTT forwarding | 8 |
+| Stephen He | Edge Detection Developer | Implemented camera-based person/fire detection pipeline on Jetson Nano B using YOLOv8, integrated inference output with MQTT event triggers | 8 |
+| Armando Hernandez | Edge Logic Developer | Developed alert decision logic on edge device, implemented GPIO-based LED alarm response and threshold-based trigger conditions | 8 |
+| Elmer Payan | Local Network Lead | Designed MQTT broker setup on Jetson Nano A, defined topic structure and peer alert routing, documented workload distributio | 8 |
 
-### ✅ Completed This Sprint
 
-- [x] Revised architecture: Jetson Nano per car → ESP32 per car + single Jetson Nano fog node
-- [x] Defined MQTT topic structure and full message flow
-- [x] Selected all hardware components (ESP32, MQ-2/MQ-135, LEDs, Jetson Nano)
-- [x] Produced system design diagram
-- [x] Produced workload distribution diagram
-- [x] Completed technical worksheet (tool inventory)
-- [x] Defined proof of concept demo plan
-- [x] Submitted Phase 2 updated proposal
+✅ Completed This Sprint
+> Pivoted architecture from fire suppression (ESP32) to platform alert system (Jetson Nano + CV)
+> 
+> Defined edge computation: YOLOv8-nano person detection running on Jetson GPU
+>
+> Defined dual-trigger input: camera inference + manual GPIO button
+>
+> Selected all hardware components
+>
+> Designed MQTT topic structure and full message flow
+>
+> Produced system design diagram and workload distribution diagram
+>
+> Completed technical worksheet (tool inventory)
+>
+> Defined proof of concept demo plan
+>
+> Submitted Phase 2 updated proposal
 
-### 🔄 In Progress — Next Sprint
-
-- [ ] ESP32 firmware: sensor polling loop + MQTT publish on threshold
-- [ ] Jetson Nano fog logic: adjacency algorithm + Mosquitto broker setup
-- [ ] Cloud server: event log API + monitoring dashboard
-- [ ] Integration testing across all three layers
-- [ ] Demo rehearsal and final adjustments
-
-### ⚠️ Blockers
-
-- Awaiting hardware delivery (ESP32 units, MQ-2/MQ-135 sensors)
-- Confirm WiFi hotspot availability for demo environment
+🔄 In Progress — Next Sprint
+> Set up YOLOv8-nano on both Jetson Nanos (CUDA-accelerated)
+>
+> Implement GPIO button input and LED output
+>
+> Set up Mosquitto broker on Jetson Nano A
+>
+> Implement paho-mqtt client on both Jetsons
+>
+> Implement cloud server event logging API
+>
+> Integration testing across both Jetsons and server
 
 ***
 
@@ -290,13 +267,11 @@ Three ESP32 units represent **Cars 1, 2, and 3**, each connected to the Jetson N
 
 ```
 TRAIN/
-├── edge/               # ESP32 firmware (Arduino / PlatformIO)
-├── fog/                # Jetson Nano Python fog application
+├── edge/               # Jetson Nano
 ├── cloud/              # Cloud server — event logging + dashboard
 └── docs/               # Diagrams, proposals, and documentation
 ```
 
-> 🔗 **Repository:** *(add your GitHub link here)*
 
 ***
 
