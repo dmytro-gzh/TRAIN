@@ -19,7 +19,7 @@ from camera_display import (
 def main():
     """
     Main program loop.
-    This function runs the full blind guider prototype.
+    This function runs the full human warning system.
     """
 
     # Load the YOLO object detection model.
