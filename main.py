@@ -1,6 +1,5 @@
 # main.py
-# This is the main file that runs the blind guider project.
-# It connects the camera, YOLO model, danger logic, display, and voice output.
+# Main program that connects all parts of the blind guider.
 
 import time
 
@@ -18,21 +17,16 @@ from camera_display import (
 
 def main():
     """
-    Main program loop.
-    This function runs the full human warning system.
+    Runs the blind guider system.
     """
 
-    # Load the YOLO object detection model.
     model = load_model()
 
-    # Open the camera.
     cap = open_camera(CAMERA_INDEX)
 
-    # Stop the program if the camera fails.
     if cap is None:
         return
 
-    # Used to prevent repeated voice warnings too quickly.
     last_spoken_time = 0
     last_message = ""
 
@@ -40,24 +34,18 @@ def main():
     print("Press Q to quit.")
 
     while True:
-        # Read one frame from the camera.
         ret, frame = cap.read()
 
-        # Stop if the camera frame cannot be read.
         if not ret:
             print("Error: Could not read camera frame.")
             break
 
-        # Run YOLO detection and danger logic.
         detections, best_warning = detect_dangerous_objects(model, frame)
 
-        # Draw boxes and warnings on the screen for demo.
         frame = draw_detections(frame, detections, best_warning)
 
-        # Get current time to control speech cooldown.
         current_time = time.time()
 
-        # Speak warning if there is one and enough time has passed.
         if best_warning:
             if (
                 current_time - last_spoken_time > SPEAK_COOLDOWN_SECONDS
@@ -67,14 +55,11 @@ def main():
                 last_spoken_time = current_time
                 last_message = best_warning
 
-        # Show camera window.
         show_frame(frame)
 
-        # Quit if user presses Q.
         if quit_requested():
             break
 
-    # Clean up camera and close windows.
     cleanup_camera(cap)
 
 

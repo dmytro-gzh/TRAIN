@@ -1,26 +1,27 @@
 # config.py
-# This file stores the main settings for the blind guider project.
-# Keeping settings in one file makes the project easier to modify.
+# Settings for the Jetson blind guider project.
 
 # Camera index:
-# 0 usually means the built-in Mac camera.
-# 1 may be an external USB camera.
+# 0 usually means the USB camera.
+# If camera does not open, try 1.
 CAMERA_INDEX = 0
 
-# YOLO model file.
-# yolov8n.pt is the small YOLOv8 nano model, good for fast testing.
+# YOLO model.
+# yolov8n.pt is the small, faster model.
 MODEL_NAME = "yolov8n.pt"
 
-# How many seconds to wait before speaking again.
-# This prevents the system from repeating warnings too quickly.
+# Minimum confidence for accepting detections.
+CONFIDENCE_THRESHOLD = 0.50
+
+# Time between spoken warnings.
+# This stops the system from repeating warnings too quickly.
 SPEAK_COOLDOWN_SECONDS = 3
 
-# Minimum confidence needed before accepting a YOLO detection.
-# 0.5 means the model must be at least 50% confident.
-CONFIDENCE_THRESHOLD = 0.5
+# Show camera window.
+# Set to False if running Jetson without monitor.
+SHOW_CAMERA_WINDOW = True
 
-# Objects that we care about for safety warnings.
-# YOLO may detect many things, but this project only warns about useful danger objects.
+# Objects that the system treats as possible danger objects.
 DANGER_OBJECTS = {
     "person",
     "car",

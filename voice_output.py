@@ -1,20 +1,17 @@
 # voice_output.py
-# This file handles voice output for the Mac version.
-# The Mac has a built-in command called "say" that turns text into speech.
+# Handles voice output on Jetson using espeak.
 
 import subprocess
 
 
 def speak(message):
     """
-    Speaks a warning message out loud using the Mac built-in 'say' command.
-
-    Example:
-    speak("Stop. person ahead.")
+    Speaks a warning message out loud.
     """
 
-    # Print the message in the terminal for debugging.
     print("VOICE:", message)
 
-    # Use the Mac text-to-speech command.
-    subprocess.run(["say", message])
+    try:
+        subprocess.run(["espeak", message], check=False)
+    except Exception as error:
+        print("Voice output failed:", error)
