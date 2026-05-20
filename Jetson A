@@ -1,0 +1,169 @@
+# nano_a_dual.py
+# Jetson A detects humans, sends messages to Jetson B,
+# and receives messages from Jetson B.
+
+import cv2
+import zmq
+import time
+from ultralytics import YOLO
+
+
+DEVICE_NAME = "Jetson A"
+
+# Change this to Jetson B's IP address.
+OTHER_JETSON_IP = "10.13.196.94"
+
+# Jetson A publishes on this port.
+MY_PUB_PORT = "5555"
+
+# Jetson B publishes on this port.
+OTHER_SUB_PORT = "5556"
+
+
+# -----------------------------
+# ZMQ SETUP
+# -----------------------------
+
+ctx = zmq.Context()
+
+# Publisher: sends messages from this Jetson.
+pub = ctx.socket(zmq.PUB)
+pub.bind(f"tcp://*:{MY_PUB_PORT}")
+
+# Subscriber: receives messages from the other Jetson.
+sub = ctx.socket(zmq.SUB)
+sub.connect(f"tcp://{OTHER_JETSON_IP}:{OTHER_SUB_PORT}")
+sub.setsockopt_string(zmq.SUBSCRIBE, "")
+
+poller = zmq.Poller()
+poller.register(sub, zmq.POLLIN)
+
+
+def send_message(message):
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    full_message = f"{DEVICE_NAME}: {message} | {timestamp}"
+    pub.send_string(full_message)
+    print("Sent:", full_message)
+
+
+def receive_messages():
+    events = dict(poller.poll(timeout=1))
+
+    if sub in events:
+        msg = sub.recv_string()
+        print("Received:", msg)
+
+
+# -----------------------------
+# YOLO SETTINGS
+# -----------------------------
+
+CAMERA_INDEX = 0
+MODEL_NAME = "yolov5nu.pt"
+CONFIDENCE_THRESHOLD = 0.50
+YOLO_IMAGE_SIZE = 224
+PROCESS_EVERY_N_FRAMES = 3
+CAMERA_WIDTH = 320
+CAMERA_HEIGHT = 240
+
+
+def main():
+    print(f"{DEVICE_NAME} starting...")
+
+    model = YOLO(MODEL_NAME)
+
+    cap = cv2.VideoCapture(CAMERA_INDEX)
+
+    if not cap.isOpened():
+        print("Error: Could not open USB camera.")
+        return
+
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
+    cap.set(cv2.CAP_PROP_FPS, 30)
+
+    frame_count = 0
+    last_boxes = []
+    human_was_detected = False
+
+    print(f"{DEVICE_NAME} running. Press Q to quit.")
+
+    # Give PUB/SUB a moment to connect.
+    time.sleep(1)
+
+    while True:
+        receive_messages()
+
+        ret, frame = cap.read()
+
+        if not ret:
+            print("Error: Could not read camera frame.")
+            break
+
+        frame_count += 1
+
+        if frame_count % PROCESS_EVERY_N_FRAMES == 0:
+            results = model(
+                frame,
+                imgsz=YOLO_IMAGE_SIZE,
+                conf=CONFIDENCE_THRESHOLD,
+                classes=[0],
+                verbose=False
+            )
+
+            human_detected = False
+            last_boxes = []
+
+            for result in results:
+                for box in result.boxes:
+                    confidence = float(box.conf[0])
+
+                    if confidence >= CONFIDENCE_THRESHOLD:
+                        human_detected = True
+
+                        x1, y1, x2, y2 = box.xyxy[0]
+                        last_boxes.append(
+                            (
+                                int(x1),
+                                int(y1),
+                                int(x2),
+                                int(y2),
+                                confidence
+                            )
+                        )
+
+            if human_detected and not human_was_detected:
+                send_message("human detected")
+
+            if not human_detected and human_was_detected:
+                send_message("human no longer detected")
+
+            human_was_detected = human_detected
+
+        for x1, y1, x2, y2, confidence in last_boxes:
+            label = f"Human {confidence:.2f}"
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.putText(
+                frame,
+                label,
+                (x1, max(y1 - 10, 20)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 255, 0),
+                2
+            )
+
+        cv2.imshow(f"{DEVICE_NAME} Human Detector", frame)
+
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+    pub.close()
+    sub.close()
+    ctx.term()
+
+
+if __name__ == "__main__":
+    main()
