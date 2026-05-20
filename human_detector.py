@@ -1,5 +1,5 @@
 # human_detector.py
-# Detects humans using YOLO and prints a message when a person is detected.
+# Optimized human detector for Jetson Nano / Jetson Orin Nano.
 
 import cv2
 from ultralytics import YOLO
@@ -12,28 +12,32 @@ MODEL_NAME = "yolov5nu.pt"
 
 CONFIDENCE_THRESHOLD = 0.50
 
-# Lower YOLO image size for faster detection
-YOLO_IMAGE_SIZE = 320
+# Smaller = faster. Try 224 for Jetson.
+YOLO_IMAGE_SIZE = 224
 
-# Process every 2 frames for speed
-PROCESS_EVERY_N_FRAMES = 2
+# Process fewer frames for speed.
+PROCESS_EVERY_N_FRAMES = 3
+
+# Camera resolution.
+CAMERA_WIDTH = 320
+CAMERA_HEIGHT = 240
 
 
 def main():
     print("Loading YOLO model...")
     model = YOLO(MODEL_NAME)
 
-    print("Opening camera...")
+    print("Opening USB camera...")
     cap = cv2.VideoCapture(CAMERA_INDEX)
 
     if not cap.isOpened():
-        print("Error: Could not open camera.")
+        print("Error: Could not open USB camera.")
         print("Try changing CAMERA_INDEX from 0 to 1.")
         return
 
-    # Lower camera resolution for faster processing
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
+    # Lower camera resolution for speed.
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
     cap.set(cv2.CAP_PROP_FPS, 30)
 
     frame_count = 0
@@ -52,67 +56,62 @@ def main():
 
         frame_count += 1
 
-        # Only run YOLO every N frames
         if frame_count % PROCESS_EVERY_N_FRAMES == 0:
-            results = model(frame, imgsz=YOLO_IMAGE_SIZE, verbose=False)
+            results = model(
+                frame,
+                imgsz=YOLO_IMAGE_SIZE,
+                conf=CONFIDENCE_THRESHOLD,
+                classes=[0],
+                verbose=False
+            )
 
             human_detected = False
             last_boxes = []
 
             for result in results:
                 for box in result.boxes:
-                    cls_id = int(box.cls[0])
                     confidence = float(box.conf[0])
-                    object_name = model.names[cls_id]
 
-                    if object_name == "person" and confidence >= CONFIDENCE_THRESHOLD:
+                    if confidence >= CONFIDENCE_THRESHOLD:
                         human_detected = True
 
                         x1, y1, x2, y2 = box.xyxy[0]
-                        x1 = int(x1)
-                        y1 = int(y1)
-                        x2 = int(x2)
-                        y2 = int(y2)
+                        last_boxes.append(
+                            (
+                                int(x1),
+                                int(y1),
+                                int(x2),
+                                int(y2),
+                                confidence
+                            )
+                        )
 
-                        last_boxes.append((x1, y1, x2, y2, confidence))
-
-            # Print only when human first appears
             if human_detected and not human_was_detected:
                 print("Human detected!")
 
-            # Optional: print when human disappears
             if not human_detected and human_was_detected:
                 print("Human no longer detected.")
 
             human_was_detected = human_detected
 
-        # Draw the most recent boxes
         for x1, y1, x2, y2, confidence in last_boxes:
-            label = f"Human detected {confidence:.2f}"
+            label = f"Human {confidence:.2f}"
 
-            cv2.rectangle(
-                frame,
-                (x1, y1),
-                (x2, y2),
-                (0, 255, 0),
-                2
-            )
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
             cv2.putText(
                 frame,
                 label,
                 (x1, max(y1 - 10, 20)),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
+                0.6,
                 (0, 255, 0),
                 2
             )
 
         cv2.imshow("Human Detector", frame)
 
-        key = cv2.waitKey(1) & 0xFF
-
-        if key == ord("q"):
+        if cv2.waitKey(1) & 0xFF == ord("q"):
             break
 
     cap.release()
