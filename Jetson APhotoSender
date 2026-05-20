@@ -1,0 +1,246 @@
+# nano_a_human_photo_sender.py
+# Jetson A:
+# Detects a human, takes a photo, names it with date/time,
+# sends the photo to Jetson B, and receives confirmation messages.
+
+import os
+import cv2
+import zmq
+import json
+import time
+from datetime import datetime
+from ultralytics import YOLO
+
+
+# -----------------------------
+# NETWORK SETTINGS
+# -----------------------------
+
+# Change this to Jetson B's IP address.
+JETSON_B_IP = "10.13.196.94"
+
+# Jetson B receives photos on this port.
+PHOTO_SEND_PORT = "5555"
+
+# Jetson A receives confirmation messages on this port.
+REPLY_RECEIVE_PORT = "5556"
+
+
+# -----------------------------
+# CAMERA / YOLO SETTINGS
+# -----------------------------
+
+CAMERA_INDEX = 0
+
+MODEL_NAME = "yolov5nu.pt"
+
+CONFIDENCE_THRESHOLD = 0.50
+
+YOLO_IMAGE_SIZE = 224
+
+PROCESS_EVERY_N_FRAMES = 3
+
+CAMERA_WIDTH = 320
+CAMERA_HEIGHT = 240
+
+# Prevent sending too many photos too fast.
+PHOTO_COOLDOWN_SECONDS = 5
+
+# Folder where Jetson A saves its own captured photos.
+PHOTO_FOLDER = "captured_photos"
+
+
+def create_filename():
+    """
+    Creates a photo filename using date and time.
+    Example: human_2026-05-19_15-42-10.jpg
+    """
+
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    return f"human_{timestamp}.jpg"
+
+
+def send_photo(push_socket, image_path, filename):
+    """
+    Sends photo metadata and image bytes to Jetson B.
+    """
+
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    metadata = {
+        "message": "human detected",
+        "timestamp": timestamp,
+        "filename": filename
+    }
+
+    with open(image_path, "rb") as file:
+        image_bytes = file.read()
+
+    push_socket.send_multipart([
+        json.dumps(metadata).encode("utf-8"),
+        image_bytes
+    ])
+
+    print("Sent photo to Jetson B:", filename)
+
+
+def receive_reply(poller, reply_pull):
+    """
+    Receives confirmation messages from Jetson B.
+    """
+
+    events = dict(poller.poll(timeout=1))
+
+    if reply_pull in events:
+        msg = reply_pull.recv_string()
+        print("Reply from Jetson B:", msg)
+
+
+def main():
+    os.makedirs(PHOTO_FOLDER, exist_ok=True)
+
+    # -----------------------------
+    # ZMQ SETUP
+    # -----------------------------
+
+    ctx = zmq.Context()
+
+    # Sends photos to Jetson B.
+    photo_push = ctx.socket(zmq.PUSH)
+    photo_push.connect(f"tcp://{JETSON_B_IP}:{PHOTO_SEND_PORT}")
+
+    # Receives confirmation messages from Jetson B.
+    reply_pull = ctx.socket(zmq.PULL)
+    reply_pull.bind(f"tcp://*:{REPLY_RECEIVE_PORT}")
+
+    poller = zmq.Poller()
+    poller.register(reply_pull, zmq.POLLIN)
+
+    print("Jetson A network setup complete.")
+    print("Sending photos to Jetson B:", JETSON_B_IP, "port", PHOTO_SEND_PORT)
+    print("Receiving replies on port:", REPLY_RECEIVE_PORT)
+
+    # -----------------------------
+    # YOLO SETUP
+    # -----------------------------
+
+    print("Loading YOLO model...")
+    model = YOLO(MODEL_NAME)
+
+    print("Opening USB camera...")
+    cap = cv2.VideoCapture(CAMERA_INDEX)
+
+    if not cap.isOpened():
+        print("Error: Could not open USB camera.")
+        print("Try changing CAMERA_INDEX from 0 to 1.")
+        return
+
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
+    cap.set(cv2.CAP_PROP_FPS, 30)
+
+    frame_count = 0
+    last_boxes = []
+    last_photo_time = 0
+
+    print("Jetson A human photo sender started.")
+    print("Press Q to quit.")
+
+    try:
+        while True:
+            # Check if Jetson B sent a reply.
+            receive_reply(poller, reply_pull)
+
+            ret, frame = cap.read()
+
+            if not ret:
+                print("Error: Could not read camera frame.")
+                break
+
+            frame_count += 1
+
+            human_detected = False
+
+            if frame_count % PROCESS_EVERY_N_FRAMES == 0:
+                results = model(
+                    frame,
+                    imgsz=YOLO_IMAGE_SIZE,
+                    conf=CONFIDENCE_THRESHOLD,
+                    classes=[0],  # COCO class 0 = person
+                    verbose=False
+                )
+
+                last_boxes = []
+
+                for result in results:
+                    for box in result.boxes:
+                        confidence = float(box.conf[0])
+
+                        if confidence >= CONFIDENCE_THRESHOLD:
+                            human_detected = True
+
+                            x1, y1, x2, y2 = box.xyxy[0]
+                            x1 = int(x1)
+                            y1 = int(y1)
+                            x2 = int(x2)
+                            y2 = int(y2)
+
+                            last_boxes.append((x1, y1, x2, y2, confidence))
+
+                current_time = time.time()
+
+                if (
+                    human_detected
+                    and current_time - last_photo_time >= PHOTO_COOLDOWN_SECONDS
+                ):
+                    filename = create_filename()
+                    image_path = os.path.join(PHOTO_FOLDER, filename)
+
+                    # Save the photo locally on Jetson A.
+                    cv2.imwrite(image_path, frame)
+
+                    print("Human detected!")
+                    print("Saved local photo:", image_path)
+
+                    # Send photo to Jetson B.
+                    send_photo(photo_push, image_path, filename)
+
+                    last_photo_time = current_time
+
+            # Draw detection boxes.
+            for x1, y1, x2, y2, confidence in last_boxes:
+                label = f"Human {confidence:.2f}"
+
+                cv2.rectangle(
+                    frame,
+                    (x1, y1),
+                    (x2, y2),
+                    (0, 255, 0),
+                    2
+                )
+
+                cv2.putText(
+                    frame,
+                    label,
+                    (x1, max(y1 - 10, 20)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 255, 0),
+                    2
+                )
+
+            cv2.imshow("Jetson A Human Detector", frame)
+
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
+
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
+        photo_push.close()
+        reply_pull.close()
+        ctx.term()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,142 @@
+# human_detector_save_photo.py
+# Detects humans using YOLO and saves a photo locally when a person is detected.
+
+import os
+import cv2
+import time
+from datetime import datetime
+from ultralytics import YOLO
+
+
+CAMERA_INDEX = 0
+
+MODEL_NAME = "yolov5nu.pt"
+
+CONFIDENCE_THRESHOLD = 0.50
+
+YOLO_IMAGE_SIZE = 224
+
+PROCESS_EVERY_N_FRAMES = 3
+
+CAMERA_WIDTH = 320
+CAMERA_HEIGHT = 240
+
+PHOTO_FOLDER = "captured_photos"
+
+# Prevent saving too many photos too fast
+PHOTO_COOLDOWN_SECONDS = 5
+
+
+def create_filename():
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    return f"human_{timestamp}.jpg"
+
+
+def main():
+    os.makedirs(PHOTO_FOLDER, exist_ok=True)
+
+    print("Loading YOLO model...")
+    model = YOLO(MODEL_NAME)
+
+    print("Opening USB camera...")
+    cap = cv2.VideoCapture(CAMERA_INDEX)
+
+    if not cap.isOpened():
+        print("Error: Could not open USB camera.")
+        print("Try changing CAMERA_INDEX from 0 to 1.")
+        return
+
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
+    cap.set(cv2.CAP_PROP_FPS, 30)
+
+    frame_count = 0
+    last_boxes = []
+    last_photo_time = 0
+
+    print("Human detector started.")
+    print("Photos will be saved in:", PHOTO_FOLDER)
+    print("Press Q to quit.")
+
+    while True:
+        ret, frame = cap.read()
+
+        if not ret:
+            print("Error: Could not read camera frame.")
+            break
+
+        frame_count += 1
+
+        human_detected = False
+
+        if frame_count % PROCESS_EVERY_N_FRAMES == 0:
+            results = model(
+                frame,
+                imgsz=YOLO_IMAGE_SIZE,
+                conf=CONFIDENCE_THRESHOLD,
+                classes=[0],
+                verbose=False
+            )
+
+            last_boxes = []
+
+            for result in results:
+                for box in result.boxes:
+                    confidence = float(box.conf[0])
+
+                    if confidence >= CONFIDENCE_THRESHOLD:
+                        human_detected = True
+
+                        x1, y1, x2, y2 = box.xyxy[0]
+                        x1 = int(x1)
+                        y1 = int(y1)
+                        x2 = int(x2)
+                        y2 = int(y2)
+
+                        last_boxes.append((x1, y1, x2, y2, confidence))
+
+            current_time = time.time()
+
+            if human_detected and current_time - last_photo_time >= PHOTO_COOLDOWN_SECONDS:
+                filename = create_filename()
+                photo_path = os.path.join(PHOTO_FOLDER, filename)
+
+                cv2.imwrite(photo_path, frame)
+
+                print("Human detected!")
+                print("Saved photo:", photo_path)
+
+                last_photo_time = current_time
+
+        for x1, y1, x2, y2, confidence in last_boxes:
+            label = f"Human {confidence:.2f}"
+
+            cv2.rectangle(
+                frame,
+                (x1, y1),
+                (x2, y2),
+                (0, 255, 0),
+                2
+            )
+
+            cv2.putText(
+                frame,
+                label,
+                (x1, max(y1 - 10, 20)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 255, 0),
+                2
+            )
+
+        cv2.imshow("Human Detector", frame)
+
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+
+if __name__ == "__main__":
+    main()

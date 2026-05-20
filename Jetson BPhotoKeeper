@@ -1,0 +1,96 @@
+# nano_b_photo_receiver_and_sender.py
+# Jetson B:
+# Receives photos from Jetson A, saves them,
+# and sends confirmation messages back to Jetson A.
+
+import os
+import json
+import time
+import zmq
+
+
+# -----------------------------
+# NETWORK SETTINGS
+# -----------------------------
+
+# Change this to Jetson A's IP address.
+JETSON_A_IP = "10.13.196.93"
+
+# Jetson B receives photos on this port.
+PHOTO_RECEIVE_PORT = "5555"
+
+# Jetson A receives replies on this port.
+MESSAGE_SEND_PORT = "5556"
+
+
+# -----------------------------
+# SAVE SETTINGS
+# -----------------------------
+
+SAVE_FOLDER = "received_photos"
+
+
+def send_reply(msg_push, filename):
+    """
+    Sends a confirmation message back to Jetson A.
+    """
+
+    reply_time = time.strftime("%Y-%m-%d %H:%M:%S")
+    reply = f"Jetson B received photo: {filename} | {reply_time}"
+
+    msg_push.send_string(reply)
+
+    print("Sent reply to Jetson A:", reply)
+
+
+def main():
+    os.makedirs(SAVE_FOLDER, exist_ok=True)
+
+    ctx = zmq.Context()
+
+    # Receives photos from Jetson A.
+    photo_pull = ctx.socket(zmq.PULL)
+    photo_pull.bind(f"tcp://*:{PHOTO_RECEIVE_PORT}")
+
+    # Sends confirmation messages back to Jetson A.
+    msg_push = ctx.socket(zmq.PUSH)
+    msg_push.connect(f"tcp://{JETSON_A_IP}:{MESSAGE_SEND_PORT}")
+
+    print("Jetson B started.")
+    print("Receiving photos on port:", PHOTO_RECEIVE_PORT)
+    print("Sending replies to Jetson A:", JETSON_A_IP, "port", MESSAGE_SEND_PORT)
+    print("Waiting for photos from Jetson A...")
+
+    try:
+        while True:
+            # Receive metadata and image bytes from Jetson A.
+            metadata_bytes, image_bytes = photo_pull.recv_multipart()
+
+            metadata = json.loads(metadata_bytes.decode("utf-8"))
+
+            filename = metadata["filename"]
+            message = metadata["message"]
+            timestamp = metadata["timestamp"]
+
+            save_path = os.path.join(SAVE_FOLDER, filename)
+
+            # Save the photo as a real JPG file.
+            with open(save_path, "wb") as file:
+                file.write(image_bytes)
+
+            print("Received photo!")
+            print("Message:", message)
+            print("Timestamp:", timestamp)
+            print("Saved as:", save_path)
+
+            # Send confirmation back to Jetson A.
+            send_reply(msg_push, filename)
+
+    finally:
+        photo_pull.close()
+        msg_push.close()
+        ctx.term()
+
+
+if __name__ == "__main__":
+    main()
