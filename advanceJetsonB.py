@@ -1,7 +1,8 @@
 # Jetson B:
 # Receives target info from Jetson A.
 # Uses Camera B to detect a chair as the simulated train track.
-# If a similar-looking person gets near the chair, it prints an alarm.
+# If a similar-looking person gets near the chair, it highlights them yellow
+# and prints an alarm message.
 #
 # Local direct version:
 # No cloud
@@ -20,6 +21,7 @@ from ultralytics import YOLO
 # NETWORK SETTINGS
 # -----------------------------
 
+# Jetson B listens for target info from Jetson A on this port.
 RECEIVE_PORT = "5555"
 
 
@@ -42,8 +44,14 @@ CAMERA_HEIGHT = 240
 # TARGET / ALARM SETTINGS
 # -----------------------------
 
+# How long Jetson B focuses on the target after receiving info from Jetson A.
 TARGET_ACTIVE_SECONDS = 12
+
+# Smaller number = stricter color matching.
+# Bigger number = looser color matching.
 COLOR_DISTANCE_THRESHOLD = 70
+
+# Prevents alarm from printing too often.
 ALARM_COOLDOWN_SECONDS = 5
 
 # Expands the chair box to create a danger area around it.
@@ -59,7 +67,7 @@ def boxes_are_close(box1, box2, padding=50):
     x1, y1, x2, y2 = box1
     a1, b1, a2, b2 = box2
 
-    # Expand chair box.
+    # Expand chair box to create danger zone.
     a1 -= padding
     b1 -= padding
     a2 += padding
@@ -74,7 +82,7 @@ def boxes_are_close(box1, box2, padding=50):
 def get_average_color(frame, box):
     """
     Gets average clothing color from upper-middle part of person box.
-    Returns BGR color: [blue, green, red]
+    Returns BGR color: [blue, green, red].
     """
 
     x1, y1, x2, y2 = box
@@ -90,7 +98,7 @@ def get_average_color(frame, box):
 
     box_height = y2 - y1
 
-    # Shirt/body area.
+    # Use upper-middle body region, roughly shirt area.
     crop_y1 = y1 + int(box_height * 0.20)
     crop_y2 = y1 + int(box_height * 0.60)
 
@@ -110,6 +118,7 @@ def get_average_color(frame, box):
 
 def color_distance(color1, color2):
     """
+    Compares two BGR colors.
     Smaller distance means colors are more similar.
     """
 
@@ -126,7 +135,7 @@ def color_distance(color1, color2):
 def receive_target_if_available(receiver):
     """
     Checks if Jetson A sent target info.
-    Non-blocking, so camera loop does not freeze.
+    Non-blocking so the camera loop does not freeze.
     """
 
     try:
@@ -140,7 +149,7 @@ def receive_target_if_available(receiver):
 
 def draw_expanded_chair_zone(frame, chair_box, padding):
     """
-    Draws the expanded danger area around the chair.
+    Draws the red danger zone around the detected chair.
     """
 
     x1, y1, x2, y2 = chair_box
@@ -153,9 +162,10 @@ def draw_expanded_chair_zone(frame, chair_box, padding):
     zy2 = min(h - 1, y2 + padding)
 
     cv2.rectangle(frame, (zx1, zy1), (zx2, zy2), (0, 0, 255), 2)
+
     cv2.putText(
         frame,
-        "Chair = Simulated Track Zone",
+        "Danger Zone",
         (zx1, max(zy1 - 10, 20)),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.5,
@@ -203,12 +213,18 @@ def main():
     people = []
     chairs = []
 
+    matched_target_box = None
+    matched_target_distance = None
+
     print("Jetson B started.")
     print("Chair will simulate the train track danger area.")
     print("Press Q to quit.")
 
     while True:
-        # Receive target info from Jetson A.
+        # -----------------------------
+        # RECEIVE TARGET FROM JETSON A
+        # -----------------------------
+
         target_data = receive_target_if_available(receiver)
 
         if target_data is not None and target_data.get("event") == "watch_target":
@@ -219,6 +235,10 @@ def main():
             print(target_data)
             print("FOCUS MODE ON for", TARGET_ACTIVE_SECONDS, "seconds.")
 
+        # -----------------------------
+        # CAMERA READ
+        # -----------------------------
+
         ret, frame = cap.read()
 
         if not ret:
@@ -228,6 +248,14 @@ def main():
         frame_count += 1
         current_time = time.time()
         target_active = current_time <= target_active_until
+
+        # Reset match display each loop.
+        matched_target_box = None
+        matched_target_distance = None
+
+        # -----------------------------
+        # YOLO DETECTION
+        # -----------------------------
 
         if frame_count % PROCESS_EVERY_N_FRAMES == 0:
             # Detect person and chair.
@@ -274,25 +302,35 @@ def main():
             if target_active and target_color is not None:
                 for person in people:
                     for chair in chairs:
-                        if boxes_are_close(
+                        near_chair = boxes_are_close(
                             person["bbox"],
                             chair["bbox"],
                             padding=CHAIR_DANGER_PADDING
-                        ):
+                        )
+
+                        if near_chair:
                             dist = color_distance(target_color, person["color"])
 
                             if dist <= COLOR_DISTANCE_THRESHOLD:
+                                matched_target_box = person["bbox"]
+                                matched_target_distance = dist
+
                                 if current_time - last_alarm_time >= ALARM_COOLDOWN_SECONDS:
                                     print("ALARM: likely target is near the simulated train track!")
                                     print("Color distance:", round(dist, 2))
                                     last_alarm_time = current_time
 
-        # Draw chairs and expanded track zones.
+        # -----------------------------
+        # DRAW CHAIR + DANGER ZONE
+        # -----------------------------
+
         for chair in chairs:
             x1, y1, x2, y2 = chair["bbox"]
             confidence = chair["confidence"]
 
+            # Purple box around actual chair.
             cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 255), 2)
+
             cv2.putText(
                 frame,
                 f"Chair/Track {confidence:.2f}",
@@ -303,26 +341,47 @@ def main():
                 2
             )
 
+            # Red expanded danger zone around chair.
             draw_expanded_chair_zone(frame, chair["bbox"], CHAIR_DANGER_PADDING)
 
-        # Draw people.
+        # -----------------------------
+        # DRAW PEOPLE
+        # -----------------------------
+
         for person in people:
             x1, y1, x2, y2 = person["bbox"]
             confidence = person["confidence"]
 
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            # Default: green box for normal person.
+            box_color = (0, 255, 0)
+            label = f"Person {confidence:.2f}"
+
+            # Yellow box if this person matches Camera A target.
+            if matched_target_box == person["bbox"]:
+                box_color = (0, 255, 255)
+                label = f"RISKY TARGET {confidence:.2f}"
+
+                if matched_target_distance is not None:
+                    label += f" match {matched_target_distance:.1f}"
+
+            cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 3)
+
             cv2.putText(
                 frame,
-                f"Person {confidence:.2f}",
+                label,
                 (x1, max(y1 - 10, 20)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.5,
-                (0, 255, 0),
+                box_color,
                 2
             )
 
-        # Draw focus mode status.
+        # -----------------------------
+        # DRAW FOCUS STATUS
+        # -----------------------------
+
         status = "FOCUS MODE ON" if target_active else "FOCUS MODE OFF"
+
         cv2.putText(
             frame,
             status,
