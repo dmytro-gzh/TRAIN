@@ -3,7 +3,7 @@ from random import uniform
 import time, base64, os
 
 alarm_status = 0
-os.makedirs("images", exist_ok=True)
+os.makedirs("captured_photos", exist_ok=True)
 
 def on_message(client, userdata, message):
     global alarm_status
@@ -12,7 +12,7 @@ def on_message(client, userdata, message):
         img_bytes = base64.b64decode(encoded)
 
         timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
-        filename = f"images/{timestamp}.jpg"
+        filename = f"captured_photos/{timestamp}.jpg"
 
         with open(filename, "wb") as f:
             f.write(img_bytes)
