@@ -1,23 +1,32 @@
 import paho.mqtt.client as mqtt 
 from random import uniform
-import time
+import time, base64, os
 
 alarm_status = 0
+os.makedirs("images", exist_ok=True)
 
 def on_message(client, userdata, message):
-  global alarm_status
-  payload = message.payload.decode("utf-8").strip()
+    global alarm_status
+    if message.topic == "ALARM/IMAGE":
+        encoded = message.payload.decode("utf-8")
+        img_bytes = base64.b64decode(encoded)
 
-  print(f"Received message on {message.topic}: {payload}")
-  
-  if message.topic == "ALARM/DETECTED":
+        timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+        filename = f"images/{timestamp}.jpg"
+
+        with open(filename, "wb") as f:
+            f.write(img_bytes)
+
+        print(f"Image saved: {filename}")
+
         alarm_status = 1
-        print(f"[!] Alarm triggered with confidence: {payload}")
-        Publish(client, 1)
+        Publish(client, 1) 
 
 def Publish(client, status):
   client.publish("ALARM/STATUS", status)
   print(f"Just published {status} to topic ALARM/STATUS")
+
+
 
 ## ***********************************************
 mqttBroker = "broker.hivemq.com" 
@@ -44,7 +53,7 @@ try:
 
     client.loop_start()
 
-    client.subscribe("ALARM/DETECTED")
+    client.subscribe("ALARM/IMAGE")
     print("Successfully connected and loop started!")
 except Exception as e:
     print(f"Connection failed: {e}")
