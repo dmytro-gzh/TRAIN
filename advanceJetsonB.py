@@ -1,135 +1,124 @@
-# Jetson B:
-# - Receives target info from Jetson A using ZeroMQ
-# - Detects person + chair using YOLO
-# - Uses chair as simulated train track danger zone
-# - Highlights risky target in yellow if it matches Jetson A target
-# - Sends photo to MQTT server when any person enters danger zone
-# - Waits for server reset before sending another photo
-#
-# MQTT topics must match your server:
-#   ALARM/IMAGE
-#   ALARM/STATUS
-
-import cv2
-import zmq
-import json
-import time
-import math
-import os
-import base64
+import paho.mqtt.client as mqtt
+import base64, os, time, cv2, json, math, zmq
 from datetime import datetime
 from ultralytics import YOLO
-import paho.mqtt.client as mqtt
 
+alarm_status = 0
 
 # -----------------------------
 # ZEROMQ SETTINGS
 # -----------------------------
-
+# Jetson B listens for target info from Jetson A
 RECEIVE_PORT = "5555"
-
-
-# -----------------------------
-# MQTT SETTINGS
-# -----------------------------
-
-mqttBroker = "broker.hivemq.com"
-websocket_port = 8000
-websocket_path = "/mqtt"
-
-MQTT_IMAGE_TOPIC = "ALARM/IMAGE"
-MQTT_STATUS_TOPIC = "ALARM/STATUS"
-
-# 0 = allowed to send image
-# 1 = server alarm is active, wait for reset
-alarm_status = 0
-
 
 # -----------------------------
 # CAMERA / YOLO SETTINGS
 # -----------------------------
 
 CAMERA_INDEX = 0
+
 MODEL_NAME = "yolov5nu.pt"
 
+# Lower confidence helps detect chair better
 CONFIDENCE_THRESHOLD = 0.35
+
+# 320 helps chair detection more than 224
 YOLO_IMAGE_SIZE = 320
+
 PROCESS_EVERY_N_FRAMES = 3
 
 CAMERA_WIDTH = 640
 CAMERA_HEIGHT = 480
 
-
-# -----------------------------
-# TARGET / ALARM SETTINGS
-# -----------------------------
-
-TARGET_ACTIVE_SECONDS = 12
-COLOR_DISTANCE_THRESHOLD = 70
 PHOTO_COOLDOWN_SECONDS = 5
-CHAIR_DANGER_PADDING = 100
 
 PHOTO_FOLDER = "captured_photos"
 
+# -----------------------------
+# CHAIR / TARGET SETTINGS
+# -----------------------------
+
+# Chair acts like the train track danger zone
+CHAIR_DANGER_PADDING = 100
+
+# How long Camera B focuses on target info from Camera A
+TARGET_ACTIVE_SECONDS = 12
+
+# Smaller = stricter shirt color match
+# Bigger = looser shirt color match
+COLOR_DISTANCE_THRESHOLD = 70
+
+# ------------------------------
+
 
 def create_filename(event_type):
+    """
+    Creates a photo filename using date and time.
+    normal_person_danger_2026-05-19_15-42-10.jpg
+    risky_target_danger_2026-05-19_15-42-10.jpg
+    """
+
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     return f"{event_type}_{timestamp}.jpg"
 
 
 def on_message(client, userdata, message):
-    """
-    Receives alarm status from the server.
-    Server sends:
-    ALARM/STATUS = 1 after it receives an image
-    ALARM/STATUS = 0 after user resets alarm on server
-    """
-
     global alarm_status
 
     payload = message.payload.decode("utf-8").strip()
 
-    print("\nMQTT message received")
-    print("Topic:", message.topic)
-    print("Payload:", payload)
+    print(f"Received message on {message.topic}: {payload}")
 
-    if message.topic == MQTT_STATUS_TOPIC:
+    if message.topic == "ALARM/STATUS":
         if payload == "1":
             alarm_status = 1
-            print("Server alarm is ON. Jetson B will stop sending images.")
+            print("Server alarm is ON. Jetson B will stop sending photos.")
 
-        elif payload == "0":
+        else:
             alarm_status = 0
-            print("Server alarm reset. Jetson B can send images again.")
+            print("Server alarm reset. Jetson B can send photos again.")
 
 
-def publish_image(client, image_path):
-    """
-    Sends image to server on ALARM/IMAGE as base64.
-    Non-blocking so the camera does not freeze.
-    """
+def publish_image(client):
+    images = sorted(os.listdir(PHOTO_FOLDER))
 
-    with open(image_path, "rb") as f:
+    if not images:
+        print("No images found, skipping.")
+        return
+
+    filepath = f"{PHOTO_FOLDER}/{images[0]}"
+
+    with open(filepath, "rb") as f:
         encoded = base64.b64encode(f.read()).decode("utf-8")
 
-    client.publish(MQTT_IMAGE_TOPIC, encoded, qos=0)
+    # qos=0 avoids freezing the camera window
+    client.publish("ALARM/IMAGE", encoded, qos=0)
 
-    print(f"Published image: {image_path}")
-    print(f"Topic: {MQTT_IMAGE_TOPIC}")
+    print(f"Published image: {filepath}")
 
-    os.remove(image_path)
-    print(f"Deleted: {image_path}")
+    os.remove(filepath)
+    print(f"Deleted: {filepath}")
+
+
+def save_photo(frame, event_type):
+    filename = create_filename(event_type)
+    image_path = os.path.join(PHOTO_FOLDER, filename)
+
+    cv2.imwrite(image_path, frame)
+    print(f"Photo saved: {image_path}")
+
+    return image_path
 
 
 def boxes_are_close(box1, box2, padding=50):
     """
-    Checks if person box overlaps the expanded chair danger zone.
+    Checks if person box overlaps expanded chair danger zone.
     """
 
     x1, y1, x2, y2 = box1
     a1, b1, a2, b2 = box2
 
-    # Expand chair box into danger zone.
+    # Expand chair box
     a1 -= padding
     b1 -= padding
     a2 += padding
@@ -143,7 +132,7 @@ def boxes_are_close(box1, box2, padding=50):
 
 def get_average_color(frame, box):
     """
-    Gets average upper-body color from person box.
+    Gets average clothing color from upper-middle part of person box.
     Returns BGR color: [blue, green, red].
     """
 
@@ -160,7 +149,7 @@ def get_average_color(frame, box):
 
     box_height = y2 - y1
 
-    # Shirt/body area.
+    # Shirt/body area
     crop_y1 = y1 + int(box_height * 0.20)
     crop_y2 = y1 + int(box_height * 0.60)
 
@@ -196,7 +185,7 @@ def color_distance(color1, color2):
 def receive_target_if_available(receiver):
     """
     Receives target info from Jetson A.
-    Non-blocking.
+    Non-blocking so camera does not freeze.
     """
 
     try:
@@ -234,148 +223,134 @@ def draw_expanded_chair_zone(frame, chair_box, padding):
     )
 
 
-def save_and_publish_photo(client, frame, event_type):
-    """
-    Saves current frame, sends it to MQTT server, then deletes local copy.
-    """
+# ******************** Establish MQTT Connection ***************************
 
-    os.makedirs(PHOTO_FOLDER, exist_ok=True)
+mqttBroker = "broker.hivemq.com"
+websocket_path = "/mqtt"
+websocket_port = 8000
 
-    filename = create_filename(event_type)
-    image_path = os.path.join(PHOTO_FOLDER, filename)
+client = mqtt.Client(client_id="Jetson-B", transport="websockets")
+client.ws_set_options(path=websocket_path)
+client.on_message = on_message
 
-    cv2.imwrite(image_path, frame)
-    print(f"Saved photo: {image_path}")
+print("Connecting to broker via WebSockets...")
 
-    publish_image(client, image_path)
+try:
+    client.connect(mqttBroker, port=websocket_port)
+    client.loop_start()
 
+    client.subscribe("ALARM/STATUS")
+    print("Successfully connected and loop started!")
+    print("Subscribed to ALARM/STATUS")
 
-def main():
-    global alarm_status
+except Exception as e:
+    print(f"Connection failed: {e}")
+    exit(1)
 
-    os.makedirs(PHOTO_FOLDER, exist_ok=True)
+# **************************************************************************
 
-    # -----------------------------
-    # MQTT SETUP
-    # -----------------------------
+# ******************** Establish ZeroMQ Receiver ***************************
 
-    client = mqtt.Client(client_id="Jetson-B", transport="websockets")
-    client.ws_set_options(path=websocket_path)
-    client.on_message = on_message
+ctx = zmq.Context()
+receiver = ctx.socket(zmq.PULL)
+receiver.bind(f"tcp://*:{RECEIVE_PORT}")
 
-    print("Connecting Jetson B to MQTT broker via WebSockets...")
+print("Jetson B waiting for target info from Jetson A on port:", RECEIVE_PORT)
 
-    try:
-        client.connect(mqttBroker, port=websocket_port)
-        client.loop_start()
+# **************************************************************************
 
-        # Subscribe to server reset/status messages.
-        client.subscribe(MQTT_STATUS_TOPIC, qos=1)
-        print("Successfully connected to MQTT broker.")
-        print(f"Subscribed to {MQTT_STATUS_TOPIC}")
+os.makedirs(PHOTO_FOLDER, exist_ok=True)
 
-    except Exception as e:
-        print(f"MQTT connection failed: {e}")
-        return
+# *** SET UP YOLO ***
 
-    # -----------------------------
-    # ZMQ SETUP
-    # -----------------------------
+print("Loading YOLO model...")
+model = YOLO(MODEL_NAME)
 
-    ctx = zmq.Context()
-    receiver = ctx.socket(zmq.PULL)
-    receiver.bind(f"tcp://*:{RECEIVE_PORT}")
+print("Opening USB camera...")
 
-    print("Jetson B waiting for target info from Jetson A on port:", RECEIVE_PORT)
+# On Jetson, do not use cv2.CAP_DSHOW
+cap = cv2.VideoCapture(CAMERA_INDEX)
 
-    # -----------------------------
-    # YOLO SETUP
-    # -----------------------------
+if not cap.isOpened():
+    print("Error: Could not open USB camera.")
+    print("Try changing CAMERA_INDEX from 0 to 1.")
+    exit(1)
 
-    print("Loading YOLO model...")
-    model = YOLO(MODEL_NAME)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
+cap.set(cv2.CAP_PROP_FPS, 30)
 
-    print("Opening Camera B...")
-    cap = cv2.VideoCapture(CAMERA_INDEX)
+frame_count = 0
+last_photo_time = 0
 
-    if not cap.isOpened():
-        print("Error: Could not open Camera B.")
-        print("Try changing CAMERA_INDEX from 0 to 1.")
-        return
+people = []
+chairs = []
 
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
-    cap.set(cv2.CAP_PROP_FPS, 30)
+target_color = None
+target_active_until = 0
 
-    target_color = None
-    target_active_until = 0
+matched_target_box = None
+matched_target_distance = None
 
-    frame_count = 0
-    last_photo_time = 0
+print("Jetson B chair danger-zone photo sender started.")
+print("Press Q to quit.")
 
-    people = []
-    chairs = []
+# ******
 
-    matched_target_box = None
-    matched_target_distance = None
+try:
+    while True:
+        # -----------------------------
+        # RECEIVE TARGET INFO FROM JETSON A
+        # -----------------------------
 
-    print("Jetson B started.")
-    print("Chair = simulated train track.")
-    print("Press Q to quit.")
+        target_data = receive_target_if_available(receiver)
 
-    try:
-        while True:
-            # -----------------------------
-            # RECEIVE TARGET FROM JETSON A
-            # -----------------------------
+        if target_data is not None and target_data.get("event") == "watch_target":
+            target_color = target_data.get("target_color")
+            target_active_until = time.time() + TARGET_ACTIVE_SECONDS
 
-            target_data = receive_target_if_available(receiver)
+            print("Received target from Jetson A:")
+            print(target_data)
+            print("FOCUS MODE ON for", TARGET_ACTIVE_SECONDS, "seconds.")
 
-            if target_data is not None and target_data.get("event") == "watch_target":
-                target_color = target_data.get("target_color")
-                target_active_until = time.time() + TARGET_ACTIVE_SECONDS
+        # -----------------------------
+        # READ CAMERA
+        # -----------------------------
 
-                print("Received target from Jetson A:")
-                print(target_data)
-                print("FOCUS MODE ON for", TARGET_ACTIVE_SECONDS, "seconds.")
+        ret, frame = cap.read()
 
-            # -----------------------------
-            # CAMERA READ
-            # -----------------------------
+        if not ret:
+            print("Error: Could not read camera frame.")
+            break
 
-            ret, frame = cap.read()
+        frame_count += 1
+        current_time = time.time()
+        target_active = current_time <= target_active_until
 
-            if not ret:
-                print("Error: Could not read Camera B frame.")
-                break
+        if frame_count % PROCESS_EVERY_N_FRAMES == 0:
+            matched_target_box = None
+            matched_target_distance = None
 
-            frame_count += 1
-            current_time = time.time()
-            target_active = current_time <= target_active_until
+            # Detect person and chair
+            # COCO class 0 = person
+            # COCO class 56 = chair
+            results = model(
+                frame,
+                imgsz=YOLO_IMAGE_SIZE,
+                conf=CONFIDENCE_THRESHOLD,
+                classes=[0, 56],
+                verbose=False
+            )
 
-            if frame_count % PROCESS_EVERY_N_FRAMES == 0:
-                matched_target_box = None
-                matched_target_distance = None
+            people = []
+            chairs = []
 
-                results = model(
-                    frame,
-                    imgsz=YOLO_IMAGE_SIZE,
-                    conf=CONFIDENCE_THRESHOLD,
-                    classes=[0, 56],  # 0 = person, 56 = chair
-                    verbose=False
-                )
+            for result in results:
+                for box in result.boxes:
+                    cls_id = int(box.cls[0])
+                    confidence = float(box.conf[0])
 
-                people = []
-                chairs = []
-
-                for result in results:
-                    for box in result.boxes:
-                        cls_id = int(box.cls[0])
-                        confidence = float(box.conf[0])
-
-                        if confidence < CONFIDENCE_THRESHOLD:
-                            continue
-
+                    if confidence >= CONFIDENCE_THRESHOLD:
                         x1, y1, x2, y2 = box.xyxy[0]
                         bbox = (int(x1), int(y1), int(x2), int(y2))
 
@@ -392,159 +367,160 @@ def main():
                                 "confidence": confidence
                             })
 
-                person_in_danger_zone = False
-                risky_target_in_danger_zone = False
-
-                for person in people:
-                    is_risky_match = False
-
-                    if target_active and target_color is not None:
-                        dist = color_distance(target_color, person["color"])
-
-                        if dist <= COLOR_DISTANCE_THRESHOLD:
-                            is_risky_match = True
-                            matched_target_box = person["bbox"]
-                            matched_target_distance = dist
-
-                    for chair in chairs:
-                        near_chair = boxes_are_close(
-                            person["bbox"],
-                            chair["bbox"],
-                            padding=CHAIR_DANGER_PADDING
-                        )
-
-                        if near_chair:
-                            person_in_danger_zone = True
-
-                            if is_risky_match:
-                                risky_target_in_danger_zone = True
-
-                # -----------------------------
-                # SEND PHOTO ONLY WHEN SERVER ALARM IS OFF
-                # -----------------------------
-
-                if person_in_danger_zone:
-                    if alarm_status == 1:
-                        print("Alarm is currently ON. Waiting for server reset...")
-
-                    else:
-                        if current_time - last_photo_time >= PHOTO_COOLDOWN_SECONDS:
-                            if risky_target_in_danger_zone:
-                                print("DANGER: risky target entered simulated track zone.")
-                                save_and_publish_photo(
-                                    client,
-                                    frame,
-                                    event_type="risky_target_danger"
-                                )
-                            else:
-                                print("DANGER: normal person entered simulated track zone.")
-                                save_and_publish_photo(
-                                    client,
-                                    frame,
-                                    event_type="normal_person_danger"
-                                )
-
-                            # Pause until server sends ALARM/STATUS = 0.
-                            alarm_status = 1
-                            last_photo_time = current_time
+            person_in_danger_zone = False
+            risky_target_in_danger_zone = False
 
             # -----------------------------
-            # DRAW CHAIR + DANGER ZONE
-            # -----------------------------
-
-            for chair in chairs:
-                x1, y1, x2, y2 = chair["bbox"]
-                confidence = chair["confidence"]
-
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 255), 2)
-
-                cv2.putText(
-                    frame,
-                    f"Chair/Track {confidence:.2f}",
-                    (x1, max(y1 - 10, 20)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    (255, 0, 255),
-                    2
-                )
-
-                draw_expanded_chair_zone(frame, chair["bbox"], CHAIR_DANGER_PADDING)
-
-            # -----------------------------
-            # DRAW PEOPLE
+            # CHECK IF PERSON IS NEAR CHAIR
             # -----------------------------
 
             for person in people:
-                x1, y1, x2, y2 = person["bbox"]
-                confidence = person["confidence"]
+                is_risky_match = False
 
-                box_color = (0, 255, 0)
-                label = f"Person {confidence:.2f}"
+                if target_active and target_color is not None:
+                    dist = color_distance(target_color, person["color"])
 
-                if matched_target_box == person["bbox"]:
-                    box_color = (0, 255, 255)
-                    label = f"RISKY TARGET {confidence:.2f}"
+                    if dist <= COLOR_DISTANCE_THRESHOLD:
+                        is_risky_match = True
+                        matched_target_box = person["bbox"]
+                        matched_target_distance = dist
 
-                    if matched_target_distance is not None:
-                        label += f" match {matched_target_distance:.1f}"
+                for chair in chairs:
+                    near_chair = boxes_are_close(
+                        person["bbox"],
+                        chair["bbox"],
+                        padding=CHAIR_DANGER_PADDING
+                    )
 
-                cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 3)
+                    if near_chair:
+                        person_in_danger_zone = True
 
-                cv2.putText(
-                    frame,
-                    label,
-                    (x1, max(y1 - 10, 20)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    box_color,
-                    2
-                )
+                        if is_risky_match:
+                            risky_target_in_danger_zone = True
 
             # -----------------------------
-            # DRAW STATUS
+            # TAKE PHOTO + SEND TO SERVER
             # -----------------------------
 
-            focus_status = "FOCUS MODE ON" if target_active else "FOCUS MODE OFF"
-            server_status = "SERVER ALARM ON" if alarm_status == 1 else "SERVER ALARM OFF"
+            if person_in_danger_zone:
+                if alarm_status == 1:
+                    print("Alarm is currently ON. Waiting for status reset...")
+
+                else:
+                    if current_time - last_photo_time >= PHOTO_COOLDOWN_SECONDS:
+                        if risky_target_in_danger_zone:
+                            print("DANGER: risky target entered simulated track zone.")
+                            save_photo(frame, "risky_target_danger")
+                        else:
+                            print("DANGER: normal person entered simulated track zone.")
+                            save_photo(frame, "normal_person_danger")
+
+                        publish_image(client)
+
+                        # Pause until server sends ALARM/STATUS = 0
+                        alarm_status = 1
+                        last_photo_time = current_time
+
+            else:
+                print("No person in danger zone")
+
+        # -----------------------------
+        # DRAW CHAIR + DANGER ZONE
+        # -----------------------------
+
+        for chair in chairs:
+            x1, y1, x2, y2 = chair["bbox"]
+            confidence = chair["confidence"]
+
+            # Purple box = chair
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 255), 2)
 
             cv2.putText(
                 frame,
-                focus_status,
-                (10, 25),
+                f"Chair/Track {confidence:.2f}",
+                (x1, max(y1 - 10, 20)),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (255, 255, 0),
+                0.5,
+                (255, 0, 255),
                 2
             )
+
+            # Red box = danger zone around chair
+            draw_expanded_chair_zone(frame, chair["bbox"], CHAIR_DANGER_PADDING)
+
+        # -----------------------------
+        # DRAW PEOPLE
+        # -----------------------------
+
+        for person in people:
+            x1, y1, x2, y2 = person["bbox"]
+            confidence = person["confidence"]
+
+            # Green = normal person
+            box_color = (0, 255, 0)
+            label = f"Person {confidence:.2f}"
+
+            # Yellow = risky target
+            if matched_target_box == person["bbox"]:
+                box_color = (0, 255, 255)
+                label = f"RISKY TARGET {confidence:.2f}"
+
+                if matched_target_distance is not None:
+                    label += f" match {matched_target_distance:.1f}"
+
+            cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 3)
 
             cv2.putText(
                 frame,
-                server_status,
-                (10, 55),
+                label,
+                (x1, max(y1 - 10, 20)),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (0, 0, 255) if alarm_status == 1 else (0, 255, 0),
+                0.5,
+                box_color,
                 2
             )
 
-            cv2.imshow("Jetson B - Chair Track MQTT Sender", frame)
+        # -----------------------------
+        # DRAW STATUS
+        # -----------------------------
 
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
+        focus_status = "FOCUS MODE ON" if target_active else "FOCUS MODE OFF"
+        server_status = "SERVER ALARM ON" if alarm_status == 1 else "SERVER ALARM OFF"
 
-    except KeyboardInterrupt:
-        print("\nDisconnecting...")
+        cv2.putText(
+            frame,
+            focus_status,
+            (10, 25),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 255, 0),
+            2
+        )
 
-    finally:
-        cap.release()
-        cv2.destroyAllWindows()
+        cv2.putText(
+            frame,
+            server_status,
+            (10, 55),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 0, 255) if alarm_status == 1 else (0, 255, 0),
+            2
+        )
 
-        receiver.close()
-        ctx.term()
+        cv2.imshow("Jetson B - Chair Danger Zone Sender", frame)
 
-        client.loop_stop()
-        client.disconnect()
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            break
 
+except KeyboardInterrupt:
+    print("\nDisconnecting...")
 
-if __name__ == "__main__":
-    main()
+finally:
+    cap.release()
+    cv2.destroyAllWindows()
+
+    receiver.close()
+    ctx.term()
+
+    client.loop_stop()
+    client.disconnect()
