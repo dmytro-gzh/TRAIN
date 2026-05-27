@@ -1,14 +1,13 @@
 # Jetson B:
-# Receives target info from Jetson A through ZeroMQ.
-# Detects person + chair using YOLO.
-# Uses chair as simulated train track.
-# If ANY person enters the danger zone, Jetson B takes a photo and sends it to MQTT server.
-# If the person matches Jetson A target color, Jetson B highlights them yellow as risky target.
+# - Receives target info from Jetson A using ZeroMQ
+# - Uses Camera B to detect person + chair
+# - Chair simulates the train track danger area
+# - Highlights risky target in yellow if similar to Jetson A target
+# - Sends photo to MQTT server when normal person or risky person enters danger zone
 #
-# Local edge + MQTT extension:
-# - ZeroMQ = Jetson A sends target info to Jetson B
-# - MQTT = Jetson B sends danger image to server
-# - No Arduino for now
+# No Arduino
+# No Google Cloud yet
+# MQTT sends image to ALARM/IMAGE
 
 import cv2
 import zmq
@@ -41,7 +40,7 @@ websocket_port = 8000
 MQTT_IMAGE_TOPIC = "ALARM/IMAGE"
 MQTT_STATUS_TOPIC = "ALARM/STATUS"
 
-alarm_status = 0
+alarm_status = False
 
 
 # -----------------------------
@@ -51,10 +50,10 @@ alarm_status = 0
 CAMERA_INDEX = 0
 MODEL_NAME = "yolov5nu.pt"
 
-# Lower confidence helps detect chair better.
+# Lower confidence helps chair detection.
 CONFIDENCE_THRESHOLD = 0.35
 
-# 320 works better than 224 for chair detection.
+# 320 is better than 224 for detecting chair.
 YOLO_IMAGE_SIZE = 320
 
 PROCESS_EVERY_N_FRAMES = 3
@@ -69,88 +68,76 @@ CAMERA_HEIGHT = 480
 
 TARGET_ACTIVE_SECONDS = 12
 
-# Smaller = stricter shirt/color matching.
-# Bigger = looser matching.
+# Smaller number = stricter shirt-color match.
+# Bigger number = looser match.
 COLOR_DISTANCE_THRESHOLD = 70
 
-# Prevents too many images from being sent.
 PHOTO_COOLDOWN_SECONDS = 5
 
-# Expands the chair box to make a danger zone around it.
+# Expands chair box to create danger zone.
 CHAIR_DANGER_PADDING = 100
 
 PHOTO_FOLDER = "captured_photos"
 
 
-def on_mqtt_message(client, userdata, message):
-    """
-    Receives alarm status from server.
-    If server sends ALARM/STATUS = 1, alarm is active.
-    If server sends ALARM/STATUS = 0, alarm is reset.
-    """
-
-    global alarm_status
-
-    payload = message.payload.decode("utf-8").strip()
-    print(f"Received MQTT message on {message.topic}: {payload}")
-
-    if message.topic == MQTT_STATUS_TOPIC:
-        if payload == "1":
-            alarm_status = 1
-        else:
-            alarm_status = 0
-
-
-def connect_mqtt():
-    """
-    Connects Jetson B to MQTT broker using WebSockets.
-    """
-
-    client = mqtt.Client(client_id="Jetson-B", transport="websockets")
-    client.ws_set_options(path=websocket_path)
-    client.on_message = on_mqtt_message
-
-    print("Connecting Jetson B to MQTT broker...")
-    client.connect(mqttBroker, port=websocket_port)
-
-    client.loop_start()
-    client.subscribe(MQTT_STATUS_TOPIC)
-
-    print("Jetson B connected to MQTT broker.")
-    return client
-
-
 def create_filename(event_type):
     """
-    Creates a photo filename using date/time.
+    Creates a photo filename using date and time.
+    Example: risky_target_danger_2026-05-22_15-42-10.jpg
     """
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     return f"{event_type}_{timestamp}.jpg"
 
 
+def on_message(client, userdata, message):
+    """
+    Receives alarm status from MQTT server.
+    ALARM/STATUS = 1 means alarm is active.
+    ALARM/STATUS = 0 means alarm is reset.
+    """
+
+    global alarm_status
+
+    payload = message.payload.decode("utf-8").strip()
+
+    print(f"Received message on {message.topic}: {payload}")
+
+    if message.topic == MQTT_STATUS_TOPIC:
+        if payload == "1":
+            alarm_status = True
+        else:
+            alarm_status = False
+
+
 def publish_image(client, image_path):
     """
-    Sends image to MQTT server as base64.
-    Server receives it on ALARM/IMAGE.
+    Reads image, base64 encodes it, and publishes it to MQTT server.
     """
 
     with open(image_path, "rb") as file:
         encoded = base64.b64encode(file.read()).decode("utf-8")
 
     client.publish(MQTT_IMAGE_TOPIC, encoded, qos=1)
-    print(f"Published image to {MQTT_IMAGE_TOPIC}: {image_path}")
+
+    print(f"Published image: {image_path}")
+
+    # Optional: delete after sending like your original code.
+    # Comment this out if you want to keep local copies.
+    os.remove(image_path)
+    print(f"Deleted local image: {image_path}")
 
 
 def boxes_are_close(box1, box2, padding=50):
     """
     Checks if person box is close to chair box.
-    The chair box is expanded to create a danger zone.
+    The chair box is expanded to create the danger zone.
     """
 
     x1, y1, x2, y2 = box1
     a1, b1, a2, b2 = box2
 
+    # Expand chair box.
     a1 -= padding
     b1 -= padding
     a2 += padding
@@ -202,7 +189,7 @@ def get_average_color(frame, box):
 def color_distance(color1, color2):
     """
     Compares two BGR colors.
-    Smaller distance = more similar.
+    Smaller distance means colors are more similar.
     """
 
     if color1 is None or color2 is None:
@@ -218,7 +205,7 @@ def color_distance(color1, color2):
 def receive_target_if_available(receiver):
     """
     Checks if Jetson A sent target info.
-    Non-blocking so camera loop does not freeze.
+    Non-blocking so the camera loop does not freeze.
     """
 
     try:
@@ -256,9 +243,9 @@ def draw_expanded_chair_zone(frame, chair_box, padding):
     )
 
 
-def save_and_send_danger_photo(client, frame, event_type):
+def save_and_publish_photo(client, frame, event_type):
     """
-    Saves a danger event photo locally and sends it to MQTT server.
+    Saves current frame and publishes it to MQTT server.
     """
 
     os.makedirs(PHOTO_FOLDER, exist_ok=True)
@@ -267,7 +254,7 @@ def save_and_send_danger_photo(client, frame, event_type):
     image_path = os.path.join(PHOTO_FOLDER, filename)
 
     cv2.imwrite(image_path, frame)
-    print("Saved danger photo:", image_path)
+    print(f"Saved photo: {image_path}")
 
     publish_image(client, image_path)
 
@@ -281,7 +268,23 @@ def main():
     # MQTT SETUP
     # -----------------------------
 
-    mqtt_client = connect_mqtt()
+    client = mqtt.Client(client_id="Jetson-B", transport="websockets")
+    client.ws_set_options(path=websocket_path)
+    client.on_message = on_message
+
+    print("Connecting to MQTT broker via WebSockets...")
+
+    try:
+        client.connect(mqttBroker, port=websocket_port)
+        client.loop_start()
+        client.subscribe(MQTT_STATUS_TOPIC)
+
+        print("Successfully connected to MQTT broker.")
+        print(f"Subscribed to {MQTT_STATUS_TOPIC}")
+
+    except Exception as error:
+        print(f"MQTT connection failed: {error}")
+        return
 
     # -----------------------------
     # ZMQ SETUP
@@ -301,6 +304,9 @@ def main():
     model = YOLO(MODEL_NAME)
 
     print("Opening Camera B...")
+
+    # On Jetson, do not use cv2.CAP_DSHOW.
+    # cv2.CAP_DSHOW is mainly for Windows.
     cap = cv2.VideoCapture(CAMERA_INDEX)
 
     if not cap.isOpened():
@@ -314,9 +320,9 @@ def main():
 
     target_color = None
     target_active_until = 0
-    last_photo_time = 0
 
     frame_count = 0
+    last_photo_time = 0
 
     people = []
     chairs = []
@@ -330,6 +336,14 @@ def main():
 
     try:
         while True:
+            # -----------------------------
+            # If server alarm is active, pause sending new images
+            # -----------------------------
+
+            if alarm_status:
+                print("Alarm is currently ON. Waiting for server reset...")
+                time.sleep(1)
+
             # -----------------------------
             # RECEIVE TARGET FROM JETSON A
             # -----------------------------
@@ -362,11 +376,14 @@ def main():
                 matched_target_box = None
                 matched_target_distance = None
 
+                # Detect person and chair.
+                # COCO class 0 = person
+                # COCO class 56 = chair
                 results = model(
                     frame,
                     imgsz=YOLO_IMAGE_SIZE,
                     conf=CONFIDENCE_THRESHOLD,
-                    classes=[0, 56],  # 0 = person, 56 = chair
+                    classes=[0, 56],
                     verbose=False
                 )
 
@@ -400,17 +417,17 @@ def main():
                             })
 
                 # -----------------------------
-                # CHECK PERSON NEAR CHAIR
+                # CHECK DANGER ZONE
                 # -----------------------------
 
                 person_in_danger_zone = False
                 risky_target_in_danger_zone = False
 
                 for person in people:
-                    # Check if this person matches Jetson A target color.
                     is_risky_match = False
                     dist = None
 
+                    # Check if this person matches Jetson A target color.
                     if target_active and target_color is not None:
                         dist = color_distance(target_color, person["color"])
 
@@ -419,7 +436,7 @@ def main():
                             matched_target_box = person["bbox"]
                             matched_target_distance = dist
 
-                    # Check if person is near any detected chair.
+                    # Check if person is near any chair.
                     for chair in chairs:
                         near_chair = boxes_are_close(
                             person["bbox"],
@@ -434,24 +451,24 @@ def main():
                                 risky_target_in_danger_zone = True
 
                 # -----------------------------
-                # SEND IMAGE TO SERVER
+                # SEND PHOTO TO MQTT SERVER
                 # -----------------------------
-                # Requirement:
-                # Send photo whenever normal person OR risky person goes into danger zone.
 
-                if person_in_danger_zone:
+                if not alarm_status and person_in_danger_zone:
                     if current_time - last_photo_time >= PHOTO_COOLDOWN_SECONDS:
+
                         if risky_target_in_danger_zone:
-                            print("DANGER: risky target entered chair danger zone.")
-                            save_and_send_danger_photo(
-                                mqtt_client,
+                            print("DANGER: risky target entered simulated track zone.")
+                            save_and_publish_photo(
+                                client,
                                 frame,
                                 event_type="risky_target_danger"
                             )
+
                         else:
-                            print("DANGER: normal person entered chair danger zone.")
-                            save_and_send_danger_photo(
-                                mqtt_client,
+                            print("DANGER: normal person entered simulated track zone.")
+                            save_and_publish_photo(
+                                client,
                                 frame,
                                 event_type="normal_person_danger"
                             )
@@ -490,9 +507,11 @@ def main():
                 x1, y1, x2, y2 = person["bbox"]
                 confidence = person["confidence"]
 
+                # Normal person = green.
                 box_color = (0, 255, 0)
                 label = f"Person {confidence:.2f}"
 
+                # Risky target match = yellow.
                 if matched_target_box == person["bbox"]:
                     box_color = (0, 255, 255)
                     label = f"RISKY TARGET {confidence:.2f}"
@@ -516,11 +535,12 @@ def main():
             # DRAW STATUS
             # -----------------------------
 
-            status = "FOCUS MODE ON" if target_active else "FOCUS MODE OFF"
+            focus_status = "FOCUS MODE ON" if target_active else "FOCUS MODE OFF"
+            alarm_text = "SERVER ALARM ON" if alarm_status else "SERVER ALARM OFF"
 
             cv2.putText(
                 frame,
-                status,
+                focus_status,
                 (10, 25),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.7,
@@ -528,13 +548,23 @@ def main():
                 2
             )
 
-            cv2.imshow("Jetson B - Chair Simulated Track + MQTT Upload", frame)
+            cv2.putText(
+                frame,
+                alarm_text,
+                (10, 55),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 0, 255) if alarm_status else (0, 255, 0),
+                2
+            )
+
+            cv2.imshow("Jetson B - Chair Track MQTT Sender", frame)
 
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
 
     except KeyboardInterrupt:
-        print("\nStopping Jetson B...")
+        print("\nDisconnecting...")
 
     finally:
         cap.release()
@@ -543,8 +573,8 @@ def main():
         receiver.close()
         ctx.term()
 
-        mqtt_client.loop_stop()
-        mqtt_client.disconnect()
+        client.loop_stop()
+        client.disconnect()
 
 
 if __name__ == "__main__":
