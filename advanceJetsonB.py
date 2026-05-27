@@ -1,12 +1,12 @@
-# jetson_b_chair_track_mqtt.py
 # Jetson B:
-# Receives target info from Jetson A using ZeroMQ.
-# Detects person + chair using YOLO.
-# Uses chair as simulated train track.
-# Sends photo to MQTT server when any person enters danger zone.
-# Waits for server reset before sending again.
+# - Receives target info from Jetson A using ZeroMQ
+# - Detects person + chair using YOLO
+# - Uses chair as simulated train track danger zone
+# - Highlights risky target in yellow if it matches Jetson A target
+# - Sends photo to MQTT server when any person enters danger zone
+# - Waits for server reset before sending another photo
 #
-# Server topics used:
+# MQTT topics must match your server:
 #   ALARM/IMAGE
 #   ALARM/STATUS
 
@@ -106,13 +106,13 @@ def on_message(client, userdata, message):
 def publish_image(client, image_path):
     """
     Sends image to server on ALARM/IMAGE as base64.
+    Non-blocking so the camera does not freeze.
     """
 
     with open(image_path, "rb") as f:
         encoded = base64.b64encode(f.read()).decode("utf-8")
 
-    result = client.publish(MQTT_IMAGE_TOPIC, encoded, qos=1)
-    result.wait_for_publish()
+    client.publish(MQTT_IMAGE_TOPIC, encoded, qos=0)
 
     print(f"Published image: {image_path}")
     print(f"Topic: {MQTT_IMAGE_TOPIC}")
@@ -444,8 +444,7 @@ def main():
                                     event_type="normal_person_danger"
                                 )
 
-                            # Immediately pause locally after sending,
-                            # even before server status message arrives.
+                            # Pause until server sends ALARM/STATUS = 0.
                             alarm_status = 1
                             last_photo_time = current_time
 
