@@ -1,8 +1,9 @@
+# jetson_b_chair_track_focus.py
 # Jetson B:
 # Receives target info from Jetson A.
 # Uses Camera B to detect a chair as the simulated train track.
-# If a similar-looking person gets near the chair, it highlights them yellow
-# and prints an alarm message.
+# Highlights a similar-looking person as the risky target in yellow.
+# Prints an alarm only when the risky target gets near the chair.
 #
 # Local direct version:
 # No cloud
@@ -32,10 +33,16 @@ RECEIVE_PORT = "5555"
 CAMERA_INDEX = 0
 MODEL_NAME = "yolov5nu.pt"
 
+# Lower this if chair/person detection is weak.
 CONFIDENCE_THRESHOLD = 0.35
+
+# 320 gives better detection than 224, especially for chair.
 YOLO_IMAGE_SIZE = 320
+
+# Higher number = faster but less smooth.
 PROCESS_EVERY_N_FRAMES = 3
 
+# Bigger preview to make aiming the camera easier.
 CAMERA_WIDTH = 640
 CAMERA_HEIGHT = 480
 
@@ -213,6 +220,7 @@ def main():
     people = []
     chairs = []
 
+    # This stores the current yellow target box.
     matched_target_box = None
     matched_target_distance = None
 
@@ -249,15 +257,15 @@ def main():
         current_time = time.time()
         target_active = current_time <= target_active_until
 
-        # Reset match display each loop.
-        matched_target_box = None
-        matched_target_distance = None
-
         # -----------------------------
         # YOLO DETECTION
         # -----------------------------
 
         if frame_count % PROCESS_EVERY_N_FRAMES == 0:
+            # Reset match only when YOLO runs.
+            matched_target_box = None
+            matched_target_distance = None
+
             # Detect person and chair.
             # COCO class 0 = person
             # COCO class 56 = chair
@@ -298,27 +306,33 @@ def main():
                             "confidence": confidence
                         })
 
-            # If focus mode is active, check if similar person is near chair.
+            # If focus mode is active, find a similar-looking person.
+            # Yellow box appears even before the person reaches the chair.
+            # Alarm only happens when that yellow person gets near the chair.
             if target_active and target_color is not None:
                 for person in people:
-                    for chair in chairs:
-                        near_chair = boxes_are_close(
-                            person["bbox"],
-                            chair["bbox"],
-                            padding=CHAIR_DANGER_PADDING
-                        )
+                    dist = color_distance(target_color, person["color"])
 
-                        if near_chair:
-                            dist = color_distance(target_color, person["color"])
+                    if dist <= COLOR_DISTANCE_THRESHOLD:
+                        matched_target_box = person["bbox"]
+                        matched_target_distance = dist
 
-                            if dist <= COLOR_DISTANCE_THRESHOLD:
-                                matched_target_box = person["bbox"]
-                                matched_target_distance = dist
+                        # Only trigger alarm if the matched target is near the chair.
+                        for chair in chairs:
+                            near_chair = boxes_are_close(
+                                person["bbox"],
+                                chair["bbox"],
+                                padding=CHAIR_DANGER_PADDING
+                            )
 
+                            if near_chair:
                                 if current_time - last_alarm_time >= ALARM_COOLDOWN_SECONDS:
                                     print("ALARM: likely target is near the simulated train track!")
                                     print("Color distance:", round(dist, 2))
                                     last_alarm_time = current_time
+
+                        # Stop after first matching target to keep display simple.
+                        break
 
         # -----------------------------
         # DRAW CHAIR + DANGER ZONE
