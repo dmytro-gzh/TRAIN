@@ -1,6 +1,8 @@
 import paho.mqtt.client as mqtt
 from random import uniform
 import base64, os, time, cv2, json
+import sounddevice as sd
+import numpy as np
 from datetime import datetime
 from ultralytics import YOLO
 
@@ -29,6 +31,13 @@ PHOTO_FOLDER = "captured_photos"
 
 # ------------------------------
 
+def beep(frequency=555, duration_ms=460):
+    sample_rate = 44100
+    t = np.linspace(0, duration_ms / 1000, int(sample_rate * duration_ms / 1000), False)
+    wave = (np.sin(2 * np.pi * frequency * t) * 32767).astype(np.int16)
+    sd.play(wave, sample_rate)
+    sd.wait() 
+
 def create_filename():
     """
     Creates a photo filename using date and time.
@@ -49,6 +58,7 @@ def on_message(client, userdata, message):
       alarm_status = 1
     else:
       alarm_status = 0
+
 
 def publish_image(client):
     images = sorted(os.listdir(PHOTO_FOLDER)) 
@@ -126,6 +136,7 @@ try:
         if alarm_status:
             print("Alarm is currently ON. Waiting for status reset...")
             time.sleep(1)
+            beep(555, 1000)
             continue
 
         ret, frame = cap.read()
