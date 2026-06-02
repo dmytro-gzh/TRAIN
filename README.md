@@ -229,39 +229,6 @@ Two Jetson Nanos are placed on opposite ends of a table representing the two pla
 | Armando Hernandez | Edge Logic Developer | Developed alert decision logic on edge device, implemented GPIO-based LED alarm response and threshold-based trigger conditions | 8 |
 | Elmer Payan | Local Network Lead | Designed MQTT broker setup on Jetson Nano A, defined topic structure and peer alert routing, documented workload distributio | 8 |
 
-
-✅ Completed This Sprint
-> Pivoted architecture from fire suppression (ESP32) to platform alert system (Jetson Nano + CV)
-> 
-> Defined edge computation: YOLOv8-nano person detection running on Jetson GPU
->
-> Defined dual-trigger input: camera inference + manual GPIO button
->
-> Selected all hardware components
->
-> Designed MQTT topic structure and full message flow
->
-> Produced system design diagram and workload distribution diagram
->
-> Completed technical worksheet (tool inventory)
->
-> Defined proof of concept demo plan
->
-> Submitted Phase 2 updated proposal
-
-🔄 In Progress — Next Sprint
-> Set up YOLOv8-nano on both Jetson Nanos (CUDA-accelerated)
->
-> Implement GPIO button input and LED output
->
-> Set up Mosquitto broker on Jetson Nano A
->
-> Implement paho-mqtt client on both Jetsons
->
-> Implement cloud server event logging API
->
-> Integration testing across both Jetsons and server
-
 ***
 
 ## 9. Repository
