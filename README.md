@@ -23,7 +23,7 @@
 7. [Proof of Concept Demo](#7-proof-of-concept-demo-plan)
 8. [Team Contribution Report](#8-team-contribution-report--scrum-sprint-report)
 9. [Repository Structure](#9-repository)
-10. [Phase 3 Deployment Report](Phase 3 Deployment Report)
+10. [Phase 3 Deployment Report](#9-repository)
 
 ***
 
