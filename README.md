@@ -1,5 +1,5 @@
 # Platform Alert System
-### Updated Project Proposal — Phase 2
+### Updated Project Proposal — Phase 3
 
 > **Team:** TRAIN &nbsp;|&nbsp; **Course:** Edge Computing &nbsp;|&nbsp; **Due:** End of Week 5
 
@@ -280,4 +280,4 @@ TRAIN/
 Phase 3 Deployment Report: https://docs.google.com/document/d/1-yZTZA6YvkL44RkCZYfoHt20mk35DeY9BIR_ChQRNmI/edit?usp=sharing
 The link above contains our report for the phase 3 Deployment.
 
-*Phase 2 Update &nbsp;|&nbsp; Team TRAIN &nbsp;|&nbsp; Edge Computing*
+*Phase 3 Update &nbsp;|&nbsp; Team TRAIN &nbsp;|&nbsp; Edge Computing*
