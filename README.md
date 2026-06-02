@@ -245,6 +245,7 @@ TRAIN/
 
 ## 10. Phase 3 Deployment Report
 Phase 3 Deployment Report: https://docs.google.com/document/d/1-yZTZA6YvkL44RkCZYfoHt20mk35DeY9BIR_ChQRNmI/edit?usp=sharing
+
 The link above contains our report for the phase 3 Deployment.
 
 *Phase 3 Update &nbsp;|&nbsp; Team TRAIN &nbsp;|&nbsp; Edge Computing*
